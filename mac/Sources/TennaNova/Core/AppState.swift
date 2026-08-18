@@ -45,6 +45,15 @@ final class AppState {
     /// Every address the phone is currently told to try, best first.
     private(set) var advertisedHosts: [String] = []
 
+    /// Main-thread mirror of `peerCapabilities`, which lives on the server queue and must
+    /// not be read from the UI. Lets a view grey out what this phone build cannot do.
+    private(set) var capabilities: Set<String> = []
+
+    var supportsImageClipboard: Bool { capabilities.contains(Proto.imageClipboardCapability) }
+
+    /// Everything the phone has mirrored, grouped into conversations.
+    let history = NotificationStore()
+
     @ObservationIgnored private var server: Server?
     @ObservationIgnored private var notifications: NotificationPresenter?
     @ObservationIgnored private var clipboard: PasteboardBridge?
@@ -55,6 +64,9 @@ final class AppState {
     @ObservationIgnored private var authenticatedSessionID: UUID?
     @ObservationIgnored private var peerCapabilities = Set<String>()
     @ObservationIgnored private var pendingBinary: PendingBinary?
+    /// Shared with `NotificationPresenter` so the cards and the window read one store.
+    @ObservationIgnored private let icons = IconCache()
+    @ObservationIgnored private var iconRequests = IconRequestPolicy()
 
     private enum PendingBinary {
         case icon(sessionID: UUID, hash: String, bytes: Int)
@@ -98,16 +110,18 @@ final class AppState {
             self.clipboard = clip
 
             server.onSessionChanged = { [weak self] session in
+                guard let self, session == nil else { return }
+                // Server-queue state, cleared on the server queue. Doing this inside the
+                // MainActor hop below raced every read of it in `handle`, which runs on
+                // that same server queue.
+                self.authenticatedSessionID = nil
+                self.peerCapabilities.removeAll()
+                self.pendingBinary = nil
+                self.clipboard?.setPeerSupportsImages(false)
                 Task { @MainActor in
-                    guard let self else { return }
-                    if session == nil {
-                        self.authenticatedSessionID = nil
-                        self.peerCapabilities.removeAll()
-                        self.pendingBinary = nil
-                        self.clipboard?.setPeerSupportsImages(false)
-                        self.status = .waitingForPhone
-                        self.pairedDevice = nil
-                    }
+                    self.capabilities = []
+                    self.status = .waitingForPhone
+                    self.pairedDevice = nil
                 }
             }
             server.onMessage = { [weak self] session, env, data in
@@ -251,7 +265,8 @@ final class AppState {
         }
 
         authenticatedSessionID = session.id
-        peerCapabilities = Set(hello.capabilities ?? [])
+        let caps = Set(hello.capabilities ?? [])
+        peerCapabilities = caps
         pendingBinary = nil
         clipboard?.setPeerSupportsImages(
             peerCapabilities.contains(Proto.imageClipboardCapability)
@@ -272,6 +287,7 @@ final class AppState {
             self.battery = hello.device.battery
             self.status = .connected(deviceName: hello.device.name)
             self.isPaired = true
+            self.capabilities = caps
             // The pairing token was just spent and rotated. Without rebuilding here the
             // menu bar keeps rendering a QR for the dead one, and the next scan — which
             // is exactly what a user does when the phone drops — fails with bad_token.
@@ -310,10 +326,14 @@ final class AppState {
         }
     }
 
-    private func send<T: Encodable>(_ message: T) {
+    /// Returns false when there is no authenticated session, so a caller that owes the
+    /// user feedback — a reply typed into the window — can say so instead of dropping it.
+    @discardableResult
+    func send<T: Encodable>(_ message: T, then: (() -> Void)? = nil) -> Bool {
         guard let session = server?.session,
-              authenticatedSessionID == session.id else { return }
-        session.send(message)
+              authenticatedSessionID == session.id else { return false }
+        session.send(message, then: then)
+        return true
     }
 
     private func sendImage(data: Data, mime: String, sha256: String,

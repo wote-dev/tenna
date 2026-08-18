@@ -18,7 +18,11 @@ let package = Package(
         .testTarget(
             name: "TennaNovaTests",
             dependencies: ["TennaNova"],
-            path: "Tests/TennaNovaTests"
+            path: "Tests/TennaNovaTests",
+            // Matches the target under test. Without it the tests build in Swift 6 mode,
+            // which is fine while they only touch plain structs and stops compiling the
+            // moment one touches a @MainActor @Observable type.
+            swiftSettings: [.swiftLanguageMode(.v5)]
         )
     ]
 )
