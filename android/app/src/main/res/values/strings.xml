@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Tennanova</string>
+    <string name="accessibility_service_label">Tennanova clipboard sync</string>
+    <string name="accessibility_service_description">Detects copy actions so clipboard text and images can sync directly with your paired Mac. It does not inspect or store screen content.</string>
+</resources>

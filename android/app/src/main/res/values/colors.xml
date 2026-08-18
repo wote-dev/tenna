@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="ic_launcher_background">#04110F</color>
+    <!-- Matches TennaTheme light background. -->
+    <color name="launch_background">#F5FBF8</color>
+</resources>

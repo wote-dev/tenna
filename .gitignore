@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Swift / SwiftPM
+mac/.build/
+mac/build/
+mac/.swiftpm/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.kotlin/
+*.apk
+
+# Scratch
+*.log

@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tennanova — Android notifications and clipboard on your Mac</title>
+<meta name="description" content="Tennanova mirrors Android notifications into macOS Notification Center and keeps one clipboard between both machines, over your own network. Coming soon, in private testing.">
+<meta name="theme-color" content="#030807">
+<meta name="color-scheme" content="dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; font-src 'self'; script-src 'self'; base-uri 'none'; form-action 'none'">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Tennanova — Private. Local. Yours.">
+<meta property="og:description" content="Android notifications in macOS Notification Center, one clipboard between both machines, no cloud account. Coming soon, in private testing.">
+<meta property="og:image" content="media/devices-1360.jpg">
+<meta name="twitter:card" content="summary_large_image">
+
+<link rel="icon" href="media/icon.png" sizes="256x256" type="image/png">
+<link rel="apple-touch-icon" href="media/icon.png">
+<link rel="preload" href="fonts/bricolage-grotesque-latin-var.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/source-sans-3-latin-var.woff2" as="font" type="font/woff2" crossorigin>
+
+<style>
+  :root { color-scheme: dark; --ink: #e4f3ef; --void: #030807; }
+  html { background: var(--void); }
+  body { margin: 0; color: var(--ink); font-family: "Source Sans 3", ui-sans-serif, system-ui, sans-serif; }
+</style>
+<link rel="stylesheet" href="styles.css">
+<script src="script.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<div class="aurora" aria-hidden="true"></div>
+
+<header class="masthead" id="masthead">
+  <div class="shell masthead__inner">
+    <div class="lockup">
+      <picture>
+        <source srcset="media/icon.webp" type="image/webp">
+        <img class="lockup__mark" src="media/icon.png" alt="Tennanova" width="40" height="40" decoding="async">
+      </picture>
+      <p class="lockup__text">
+        <span class="lockup__name">Tennanova</span>
+        <span class="lockup__tag">Private. Local. Yours.</span>
+      </p>
+    </div>
+
+    <p class="chip"><span class="chip__pulse" aria-hidden="true"></span>Private testing</p>
+  </div>
+</header>
+
+<main id="main">
+
+  <section class="hero shell" aria-labelledby="hero-title">
+    <div class="hero__copy">
+      <p class="eyebrow">Android&nbsp;13+ &nbsp;·&nbsp; macOS&nbsp;14+</p>
+
+      <h1 id="hero-title">
+        Your phone's notifications,<br>
+        <em>answered from your Mac.</em>
+      </h1>
+
+      <p class="lede">
+        Tennanova is two small apps — one in the macOS menu bar, one on your Android phone —
+        that talk straight to each other over a single encrypted connection on your own
+        network. Notifications arrive on the Mac, replies go back to the app that sent them,
+        and both machines share one clipboard.
+      </p>
+
+      <p class="tagline">Private. Local. Yours.</p>
+
+      <div class="notice">
+        <h2 class="notice__title">Coming soon, in private testing</h2>
+        <p>
+          Tennanova is not released yet. A small invited group is running it on real
+          hardware while notification replies, clipboard capture and the USB fallback get
+          hardened. There is nothing to download from this page — when testing widens,
+          this is where it will be announced.
+        </p>
+      </div>
+    </div>
+
+    <aside class="sheet" aria-label="At a glance">
+      <dl class="sheet__list">
+        <div class="sheet__row">
+          <dt>Status</dt>
+          <dd>Private testing · unreleased</dd>
+        </div>
+        <div class="sheet__row">
+          <dt>Mac</dt>
+          <dd>macOS 14+, Apple silicon</dd>
+        </div>
+        <div class="sheet__row">
+          <dt>Phone</dt>
+          <dd>Android 13+</dd>
+        </div>
+        <div class="sheet__row">
+          <dt>Transport</dt>
+          <dd>TLS on your LAN, automatic USB fallback</dd>
+        </div>
+        <div class="sheet__row">
+          <dt>Account</dt>
+          <dd>None. No cloud, no telemetry</dd>
+        </div>
+      </dl>
+    </aside>
+  </section>
+
+  <figure class="still">
+    <picture>
+      <source
+        type="image/webp"
+        srcset="media/devices-800.webp 800w, media/devices-1360.webp 1360w"
+        sizes="(max-width: 900px) 100vw, 1100px">
+      <img
+        src="media/devices-1360.jpg"
+        srcset="media/devices-800.jpg 800w, media/devices-1360.jpg 1360w"
+        sizes="(max-width: 900px) 100vw, 1100px"
+        alt="A MacBook and an Android phone facing each other, with text, image and message tiles carried between them on a stream of green light."
+        width="1360" height="724" loading="lazy" decoding="async">
+    </picture>
+    <figcaption>Mac menu bar to Android phone, over your own network. Nothing in between.</figcaption>
+  </figure>
+
+  <section class="block shell" id="features" aria-labelledby="features-title">
+    <div class="block__head">
+      <h2 id="features-title">What it does</h2>
+      <p class="block__note">Six things, done properly, instead of thirty half-finished ones.</p>
+    </div>
+
+    <ol class="rows">
+      <li class="row">
+        <p class="row__index" aria-hidden="true">01</p>
+        <h3 class="row__title">Notifications land where you already look</h3>
+        <p class="row__body">
+          Alerts appear in macOS Notification Center with the app's name and its icon.
+          Group summaries, ongoing foreground-service clutter and anything you have muted
+          never leave the phone, so the Mac stays quiet.
+        </p>
+      </li>
+
+      <li class="row">
+        <p class="row__index" aria-hidden="true">02</p>
+        <h3 class="row__title">Reply with a real keyboard</h3>
+        <p class="row__body">
+          Type into the notification on macOS and the text goes back through the
+          notification's own reply field. It lands in the actual conversation, in the
+          actual app — not a workaround, and not an SMS gateway.
+        </p>
+      </li>
+
+      <li class="row">
+        <p class="row__index" aria-hidden="true">03</p>
+        <h3 class="row__title">Press the buttons the app shipped with</h3>
+        <p class="row__body">
+          Mark as read, archive, snooze, mute — whichever action buttons a notification
+          carries are all invokable from the Mac.
+        </p>
+      </li>
+
+      <li class="row">
+        <p class="row__index" aria-hidden="true">04</p>
+        <h3 class="row__title">Dismiss it once</h3>
+        <p class="row__body">
+          Clear it on the Mac and it clears on the phone. Clear it on the phone and it
+          leaves Notification Center. You never triage the same alert twice.
+        </p>
+      </li>
+
+      <li class="row">
+        <p class="row__index" aria-hidden="true">05</p>
+        <h3 class="row__title">One clipboard, both directions</h3>
+        <p class="row__body">
+          Copy a link, a code or a paragraph on either machine and paste it on the other.
+          One real image travels too, including image files copied in Finder; every image
+          is checked against its advertised size and hash before it reaches your clipboard.
+        </p>
+      </li>
+
+      <li class="row">
+        <p class="row__index" aria-hidden="true">06</p>
+        <h3 class="row__title">Stays between your two machines</h3>
+        <p class="row__body">
+          A single TLS connection runs directly between the apps, pinned to your Mac's own
+          key. If your router blocks device-to-device traffic, Tennanova keeps a USB tunnel
+          alive on its own. There is no server in the middle and nothing to upload.
+        </p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="block shell" id="setup" aria-labelledby="setup-title">
+    <div class="block__head">
+      <h2 id="setup-title">Set up once, in about a minute</h2>
+      <p class="block__note">Three steps, then it is quiet forever.</p>
+    </div>
+
+    <ol class="steps">
+      <li class="step">
+        <p class="step__index" aria-hidden="true">1</p>
+        <h3 class="step__title">Open the Mac app</h3>
+        <p class="step__body">
+          It appears in the menu bar and shows a pairing code the moment it launches.
+        </p>
+      </li>
+      <li class="step">
+        <p class="step__index" aria-hidden="true">2</p>
+        <h3 class="step__title">Scan it on the phone</h3>
+        <p class="step__body">
+          Tap <b>Scan pairing code</b>. The scanner is the system one, so Tennanova never
+          asks for your camera.
+        </p>
+      </li>
+      <li class="step">
+        <p class="step__index" aria-hidden="true">3</p>
+        <h3 class="step__title">Confirm two Android grants</h3>
+        <p class="step__body">
+          Notification access, then Accessibility for clipboard capture. Coming back from
+          each Settings screen moves you along by itself.
+        </p>
+      </li>
+    </ol>
+
+    <div class="plain">
+      <h3 class="plain__title">And what you never have to do</h3>
+      <ul class="plain__list">
+        <li>Install Shizuku, a daemon or a privileged bridge</li>
+        <li>Go through wireless-debugging pairing</li>
+        <li>Redo anything after a reboot</li>
+        <li>Create an account or hand over an email address</li>
+      </ul>
+    </div>
+  </section>
+
+  <section class="block shell" id="limits" aria-labelledby="limits-title">
+    <div class="block__head">
+      <h2 id="limits-title">What it deliberately isn't</h2>
+      <p class="block__note">Left out on purpose, not waiting on a roadmap.</p>
+    </div>
+
+    <ul class="tags">
+      <li>Screen mirroring</li>
+      <li>Webcam</li>
+      <li>Calls</li>
+      <li>SMS threads</li>
+      <li>File transfer</li>
+      <li>A cloud account</li>
+    </ul>
+
+    <p class="closing">
+      Tennanova does notifications and the clipboard, and it does them without a service in
+      the middle. It is coming soon — private testing first.
+    </p>
+  </section>
+
+</main>
+
+<footer class="footer">
+  <div class="shell footer__inner">
+    <p class="footer__brand">Tennanova</p>
+    <p class="footer__meta">Private. Local. Yours. &nbsp;·&nbsp; Coming soon, in private testing.</p>
+  </div>
+</footer>
+</body>
+</html>

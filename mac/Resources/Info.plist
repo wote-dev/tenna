@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>Tennanova</string>
+	<key>CFBundleDisplayName</key>
+	<string>Tennanova</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.tennanova.mac</string>
+	<key>CFBundleExecutable</key>
+	<string>TennaNova</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+
+	<!-- Menu bar only: no Dock icon, no main window. -->
+	<key>LSUIElement</key>
+	<true/>
+
+	<!-- macOS 15+ requires both of these to use Bonjour / the local network. -->
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Tennanova connects directly to your Android phone on this network to sync notifications and the clipboard. Nothing is sent to any server.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_tennanova._tcp</string>
+	</array>
+</dict>
+</plist>
