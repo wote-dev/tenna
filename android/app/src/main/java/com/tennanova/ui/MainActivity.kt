@@ -164,7 +164,9 @@ class MainActivity : ComponentActivity() {
                 requestNotificationRebind()
                 onboardingStep = null
                 RuntimeStatusStore.pairingChanged()
-                viewModel.setMessage("Setup complete. Connecting securely…")
+                // Transient: the hero owns connection status from here, and this line
+                // must not outlive the attempt it describes.
+                viewModel.setMessage("Setup complete.", transient = true)
             }
         }
     }

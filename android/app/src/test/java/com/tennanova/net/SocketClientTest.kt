@@ -18,9 +18,30 @@ class SocketClientTest {
 
     @Test fun lanStillWorksForLegacyPairingCodes() {
         assertEquals(
-            listOf(ConnectionEndpoint("mac.local", 18777, isUsb = false)),
+            listOf(
+                ConnectionEndpoint("mac.local", 18777, isUsb = false),
+                ConnectionEndpoint("127.0.0.1", 18777, isUsb = true)
+            ),
             buildEndpointCandidates(listOf("mac.local"), 18777, null)
         )
+    }
+
+    @Test fun unknownUsbIsProbedLastRatherThanNotAtAll() {
+        // A phone paired while unplugged is never taught usbPort, and on a network with
+        // AP client isolation it cannot establish the session that would teach it. So the
+        // loopback guess goes on the end, where it costs a timeout only once every real
+        // address has already failed.
+        val endpoints = buildEndpointCandidates(listOf("192.168.1.20", "192.168.1.21"), 18777, null)
+
+        assertEquals(ConnectionEndpoint("127.0.0.1", 18777, isUsb = true), endpoints.last())
+        assertTrue(endpoints.dropLast(1).none { it.isUsb })
+    }
+
+    @Test fun aKnownUsbPortIsNotAlsoGuessedAtTheEnd() {
+        val endpoints = buildEndpointCandidates(listOf("192.168.1.20"), 18777, 18777)
+
+        assertEquals(1, endpoints.count { it.isUsb })
+        assertTrue(endpoints.first().isUsb)
     }
 
     @Test fun duplicateLoopbackEndpointIsOnlyTriedOnce() {
@@ -36,7 +57,8 @@ class SocketClientTest {
         assertEquals(
             listOf(
                 ConnectionEndpoint("192.168.1.20", 18777, isUsb = false),
-                ConnectionEndpoint("192.168.43.37", 18777, isUsb = false)
+                ConnectionEndpoint("192.168.43.37", 18777, isUsb = false),
+                ConnectionEndpoint("127.0.0.1", 18777, isUsb = true)
             ),
             buildEndpointCandidates(listOf("192.168.1.20", "192.168.43.37"), 18777, null)
         )
@@ -44,12 +66,17 @@ class SocketClientTest {
 
     @Test fun repeatedAddressesCollapse() {
         assertEquals(
-            listOf(ConnectionEndpoint("192.168.1.20", 18777, isUsb = false)),
+            listOf(
+                ConnectionEndpoint("192.168.1.20", 18777, isUsb = false),
+                ConnectionEndpoint("127.0.0.1", 18777, isUsb = true)
+            ),
             buildEndpointCandidates(listOf("192.168.1.20", "192.168.1.20"), 18777, null)
         )
     }
 
     @Test fun noKnownAddressesMeansNothingToTry() {
+        // An empty list is how "not paired" reaches the client, so the loopback guess must
+        // not fire here either — it would turn UNPAIRED into a permanent CONNECTING.
         assertTrue(buildEndpointCandidates(emptyList(), 18777, null).isEmpty())
     }
 

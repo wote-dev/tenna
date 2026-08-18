@@ -18,7 +18,6 @@ import org.json.JSONObject
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.net.ssl.SSLHandshakeException
 
 internal data class ConnectionEndpoint(val host: String, val port: Int, val isUsb: Boolean)
 
@@ -34,6 +33,17 @@ internal fun buildEndpointCandidates(
 ): List<ConnectionEndpoint> = buildList {
     if (usbPort != null) add(ConnectionEndpoint("127.0.0.1", usbPort, true))
     lanHosts.forEach { add(ConnectionEndpoint(it, lanPort, false)) }
+    // Unknown-USB fallback, deliberately *last*.
+    //
+    // `usbPort` is only ever taught by the Mac, and the Mac only advertises it while the
+    // tunnel is genuinely up — so a phone paired while unplugged knows nothing about USB
+    // and, on a network with AP client isolation, has no reachable endpoint at all. It
+    // cannot be told either: `mac.hosts` needs a session that can never be established.
+    // Trying loopback costs one 1s timeout after every real address has already failed,
+    // which is the only situation where it matters.
+    if (usbPort == null && lanHosts.isNotEmpty()) {
+        add(ConnectionEndpoint("127.0.0.1", lanPort, true))
+    }
 }.distinctBy { it.host to it.port }
 
 /** TLS-pinned, single-flight WebSocket client. */
@@ -49,7 +59,7 @@ class SocketClient(
      */
     private val onEndpointsExhausted: () -> Unit = {}
 ) {
-    enum class State { DISCONNECTED, CONNECTING, CONNECTED, PIN_MISMATCH, UNPAIRED }
+    enum class State { DISCONNECTED, CONNECTING, CONNECTED, PIN_MISMATCH, AUTH_FAILED, UNPAIRED }
 
     private val shouldRun = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -59,6 +69,31 @@ class SocketClient(
     private var client: OkHttpClient? = null
     private var reconnect: Runnable? = null
     private var generation = 0L
+    /**
+     * Index of the endpoint currently being attempted within [generation].
+     *
+     * Currency is tracked by (generation, index) rather than by WebSocket identity because
+     * okhttp can deliver `onFailure` before `newWebSocket` has even returned — which an
+     * instantly-refused loopback endpoint does routinely. Identity matching then saw a
+     * callback for a socket it had not recorded yet, discarded it, and left the client
+     * wedged in CONNECTING with no reconnect pending and nothing to kick it.
+     */
+    private var attempt = 0
+    /**
+     * Fires when an attempt stops making progress without okhttp ever calling back.
+     *
+     * `connectTimeout` bounds only the TCP connect, and `readTimeout` is 0 because a live
+     * session is meant to idle indefinitely. Between those two there is a gap: a peer that
+     * accepts TCP and then stalls the TLS handshake or the HTTP-101 upgrade produces
+     * neither `onOpen` nor `onFailure`, and the client sits in CONNECTING forever. A
+     * half-alive `adb reverse` tunnel and a [SubnetScanner] hit — which only proves a port
+     * is open — both do exactly that.
+     *
+     * okhttp's own `callTimeout` is not usable here: it bounds the whole call, and for a
+     * WebSocket the call lasts as long as the session, so it would tear down healthy
+     * connections.
+     */
+    private var watchdog: Runnable? = null
     private var backoffMs = 1_000L
     // Written from okhttp's callback threads, read from the main thread by retryNow and
     // by the listener before it moves endpoints.
@@ -82,6 +117,7 @@ class SocketClient(
             generation++
             reconnect?.let(mainHandler::removeCallbacks)
             reconnect = null
+            disarmWatchdogLocked()
             old = ws
             ws = null
         }
@@ -89,6 +125,43 @@ class SocketClient(
         client?.dispatcher?.executorService?.shutdown()
         client = null
         setState(State.DISCONNECTED)
+    }
+
+    /**
+     * The session got past `hello`, so the endpoint is good for more than a TCP handshake.
+     *
+     * Resetting the backoff on open instead meant a Mac that accepts the socket and then
+     * rejects the handshake was retried once a second forever: the open reset the delay,
+     * the rejection closed the socket, and nothing ever grew it.
+     */
+    fun sessionAuthenticated() {
+        synchronized(lifecycleLock) {
+            backoffMs = 1_000L
+            disarmWatchdogLocked()
+        }
+    }
+
+    /**
+     * The Mac refused our credentials. Terminal in the same way a pin mismatch is — the
+     * token is wrong and reconnecting cannot make it right — so stop and let the UI say so.
+     */
+    fun failAuthentication() {
+        val old: WebSocket?
+        synchronized(lifecycleLock) {
+            fatal = true
+            generation++
+            reconnect?.let(mainHandler::removeCallbacks)
+            reconnect = null
+            disarmWatchdogLocked()
+            old = ws
+            ws = null
+        }
+        shouldRun.set(false)
+        old?.close(1000, "authentication rejected")
+        client?.dispatcher?.executorService?.shutdown()
+        client = null
+        // Deliberately not stop(), which would end on DISCONNECTED and bury the reason.
+        setState(State.AUTH_FAILED)
     }
 
     fun send(json: JSONObject): Boolean = synchronized(sendLock) {
@@ -134,6 +207,10 @@ class SocketClient(
     ) {
         if (!shouldRun.get() || index !in endpoints.indices) return
         val endpoint = endpoints[index]
+        synchronized(lifecycleLock) {
+            if (generation != id || !shouldRun.get()) return
+            attempt = index
+        }
 
         try {
             val trustManager = PinnedTrustManager(spki)
@@ -167,23 +244,45 @@ class SocketClient(
                 "[${endpoint.host}]" else endpoint.host
             val request = Request.Builder().url("wss://$urlHost:${endpoint.port}/").build()
 
+            // Outside the listener because the stall watchdog reads it too.
+            val opened = AtomicBoolean(false)
+
+            /** The tail every abandoned attempt shares, whether okhttp reported it or not. */
+            fun abandon(socket: WebSocket?) {
+                socket?.cancel()
+                if (!opened.get() && index + 1 < endpoints.size) {
+                    http.dispatcher.executorService.shutdown()
+                    http.connectionPool.evictAll()
+                    connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen)
+                    return
+                }
+                setState(State.DISCONNECTED)
+                if (!opened.get()) onEndpointsExhausted()
+                scheduleReconnect(id)
+            }
+
             val socket = http.newWebSocket(request, object : WebSocketListener() {
-                private var opened = false
 
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    if (!isCurrent(id, webSocket)) return
-                    opened = true
+                    if (!isCurrent(id, index)) return
+                    opened.set(true)
                     Log.i(TAG, "connected over ${if (endpoint.isUsb) "USB" else "LAN"} " +
                         "to ${endpoint.host}:${endpoint.port}")
-                    synchronized(lifecycleLock) { backoffMs = 1_000L }
                     // The address that just worked leads the list next time, so a phone
                     // that stays on one hotspot stops paying for the stale entries.
                     if (!endpoint.isUsb) settings.promoteHost(endpoint.host)
                     setState(State.CONNECTED)
+                    // A Mac that accepts the socket and then never acks `hello` leaves us
+                    // in AUTHENTICATING with nothing to time it out. Cleared by
+                    // sessionAuthenticated().
+                    armWatchdog(id, index, AUTH_TIMEOUT_MS) {
+                        Log.w(TAG, "no hello.ack from ${endpoint.host}:${endpoint.port}; giving up")
+                        abandon(webSocket)
+                    }
                 }
 
                 override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (!isCurrent(id, webSocket)) return
+                    if (!isCurrent(id, index)) return
                     try {
                         val obj = JSONObject(text)
                         if (obj.optInt("v") != Proto.VERSION) {
@@ -197,26 +296,26 @@ class SocketClient(
                 }
 
                 override fun onMessage(webSocket: WebSocket, bytes: ByteString) {
-                    if (isCurrent(id, webSocket)) onBinary(bytes.toByteArray())
+                    if (isCurrent(id, index)) onBinary(bytes.toByteArray())
                 }
 
                 override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-                    if (!isCurrent(id, webSocket)) return
                     val mismatch = generateSequence(t as Throwable?) { it.cause }
                         .any { it is PinnedTrustManager.PinMismatch }
-                    if (!opened && index + 1 < endpoints.size) {
+                    // Claiming retires this attempt, so the registration below stands down
+                    // if it lost the race, and no second callback can act on it either.
+                    if (!claimAttempt(id, index)) return
+                    if (!opened.get() && index + 1 < endpoints.size) {
                         Log.i(TAG, "${if (endpoint.isUsb) "USB" else "LAN"} endpoint failed; " +
                             "trying ${if (endpoints[index + 1].isUsb) "USB" else "LAN"}")
-                        synchronized(lifecycleLock) {
-                            if (generation == id && ws === webSocket) ws = null
-                        }
                         webSocket.cancel()
                         http.dispatcher.executorService.shutdown()
                         http.connectionPool.evictAll()
                         connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen || mismatch)
                         return
                     }
-                    if (mismatch || pinMismatchSeen || t is SSLHandshakeException && mismatch) {
+                    webSocket.cancel()
+                    if (mismatch || pinMismatchSeen) {
                         Log.e(TAG, "TLS pin mismatch on every available endpoint — re-pair required")
                         synchronized(lifecycleLock) { fatal = true }
                         setState(State.PIN_MISMATCH)
@@ -226,21 +325,34 @@ class SocketClient(
                     setState(State.DISCONNECTED)
                     // Nothing answered anywhere we know about. The Mac may have moved to
                     // an address that was never in the list.
-                    if (!opened) onEndpointsExhausted()
+                    if (!opened.get()) onEndpointsExhausted()
                     scheduleReconnect(id)
                 }
 
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-                    if (!isCurrent(id, webSocket)) return
+                    if (!claimAttempt(id, index)) return
                     Log.i(TAG, "closed: $code $reason")
                     setState(State.DISCONNECTED)
                     scheduleReconnect(id)
                 }
             })
             synchronized(lifecycleLock) {
-                if (generation == id && shouldRun.get()) ws = socket else socket.cancel()
+                if (generation == id && attempt == index && shouldRun.get()) ws = socket
+                else socket.cancel()
+            }
+            // Only if okhttp has not already opened the socket — it can call back before
+            // `newWebSocket` returns, and onOpen has armed the authentication timer by then.
+            if (!opened.get()) {
+                val connectBudget =
+                    (if (endpoint.isUsb) USB_CONNECT_TIMEOUT_MS else LAN_CONNECT_TIMEOUT_MS) +
+                        HANDSHAKE_GRACE_MS
+                armWatchdog(id, index, connectBudget) {
+                    Log.w(TAG, "${endpoint.host}:${endpoint.port} stalled before opening; moving on")
+                    abandon(socket)
+                }
             }
         } catch (e: Exception) {
+            if (!claimAttempt(id, index)) return
             if (index + 1 < endpoints.size) {
                 connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen)
             } else {
@@ -292,8 +404,42 @@ class SocketClient(
         connect()
     }
 
-    private fun isCurrent(id: Long, socket: WebSocket): Boolean =
-        synchronized(lifecycleLock) { generation == id && ws === socket && shouldRun.get() }
+    private fun isCurrent(id: Long, index: Int): Boolean =
+        synchronized(lifecycleLock) { generation == id && attempt == index && shouldRun.get() }
+
+    /**
+     * Atomically retires endpoint [index] of [id] and moves past it, so exactly one
+     * callback can decide what happens next even when several fire for the same attempt.
+     */
+    private fun claimAttempt(id: Long, index: Int): Boolean = synchronized(lifecycleLock) {
+        if (generation != id || attempt != index || !shouldRun.get()) return false
+        attempt = index + 1
+        ws = null
+        // Whatever happens next re-arms if it needs to. Disarming here means every exit
+        // from an attempt — real callback or watchdog — leaves no timer behind.
+        disarmWatchdogLocked()
+        true
+    }
+
+    /** Caller must hold [lifecycleLock]. */
+    private fun disarmWatchdogLocked() {
+        watchdog?.let(mainHandler::removeCallbacks)
+        watchdog = null
+    }
+
+    /**
+     * Arms a stall timer for endpoint [index] of [id]. [onStall] runs on the main thread
+     * and only if the attempt is still the current one.
+     */
+    private fun armWatchdog(id: Long, index: Int, delayMs: Long, onStall: () -> Unit) {
+        val task = Runnable { if (claimAttempt(id, index)) onStall() }
+        synchronized(lifecycleLock) {
+            if (generation != id || attempt != index || !shouldRun.get()) return
+            disarmWatchdogLocked()
+            watchdog = task
+        }
+        mainHandler.postDelayed(task, delayMs)
+    }
 
     private fun setState(value: State) {
         if (state == value) return
@@ -305,5 +451,9 @@ class SocketClient(
         const val TAG = "TennaNova"
         const val LAN_CONNECT_TIMEOUT_MS = 3_000L
         const val USB_CONNECT_TIMEOUT_MS = 1_000L
+        /** Headroom over the TCP connect for the TLS handshake and the HTTP-101 upgrade. */
+        const val HANDSHAKE_GRACE_MS = 5_000L
+        /** From an open socket to `hello.ack`. Generous: the Mac replays notifications first. */
+        const val AUTH_TIMEOUT_MS = 10_000L
     }
 }

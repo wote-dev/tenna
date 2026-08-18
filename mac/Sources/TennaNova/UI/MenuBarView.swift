@@ -19,7 +19,9 @@ struct MenuBarView: View {
             Divider()
 
             HStack {
-                if state.status.isConnected {
+                // Not gated on being connected: a stuck phone is exactly when unpairing
+                // is needed, and unpair() is what mints a fresh token and QR.
+                if state.isPaired {
                     Button("Unpair") { state.unpair() }
                 }
                 Spacer()
@@ -65,6 +67,22 @@ struct MenuBarView: View {
             Text("Scan this with Tennanova on your phone")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+
+            // Pairing with the tunnel down used to be silently different: the code carries
+            // no usbPort, and on a network that blocks device-to-device traffic that is the
+            // difference between a phone that connects and one that never can. The phone
+            // now guesses loopback as a last resort and the Mac re-advertises the port when
+            // the tunnel appears, but plugging in first is still the way to get it right.
+            if !state.usbStatus.isReady {
+                Label(
+                    "No USB tunnel — this code is LAN-only. Plug the phone in first if your "
+                        + "network blocks device-to-device traffic.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            }
 
             if let img = QRCode.image(from: state.pairingPayload) {
                 Image(nsImage: img)

@@ -35,7 +35,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val pairing = MutableStateFlow(pairingState())
     private val listenerEnabled = MutableStateFlow(false)
     private val accessibilityEnabled = MutableStateFlow(false)
-    private val message = MutableStateFlow<String?>(null)
+    private val message = MutableStateFlow<Banner?>(null)
+
+    /**
+     * A one-off line under the connection hero.
+     *
+     * [transient] marks a line that belongs to an attempt still in flight, so it is wrong
+     * the moment the connection settles *however* it settles — not only on success.
+     *
+     * This used to be a bare string cleared by testing `startsWith("Pairing saved")` while
+     * connected. Two things went wrong with that. The onboarding variant did not match the
+     * prefix and so never cleared at all, and neither variant cleared on failure — leaving
+     * "Connecting securely…" pinned under a hero that said "Mac offline". The hero owns
+     * connection status; a banner that restates it can only ever contradict it, so these
+     * no longer try.
+     */
+    private data class Banner(val text: String, val transient: Boolean = false)
 
     val uiState = combine(
         pairing, listenerEnabled, accessibilityEnabled, RuntimeStatusStore.state, message
@@ -54,10 +69,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
             peerSupportsImages = runtime.peerSupportsImages,
             lastTransfer = runtime.lastTransfer,
-            message = localMessage?.takeUnless {
-                runtime.connection == ConnectionStatus.CONNECTED &&
-                    it.startsWith("Pairing saved")
-            },
+            message = localMessage
+                ?.takeUnless { it.transient && runtime.connection.isSettled }
+                ?.text,
             error = runtime.connectionError ?: runtime.transferError,
             clipboardError = runtime.clipboardError
         )
@@ -95,12 +109,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun pair(raw: String): Boolean {
         val payload = PairingPayload.parse(raw.trim())
         if (payload == null) {
-            message.value = "That pairing code is invalid or incomplete."
+            message.value = Banner("That pairing code is invalid or incomplete.")
             return false
         }
         settings.savePairing(payload)
         pairing.value = pairingState()
-        message.value = "Pairing saved. Connecting securely…"
+        message.value = Banner("Pairing saved.", transient = true)
         RuntimeStatusStore.pairingChanged()
         return true
     }
@@ -108,12 +122,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun unpair() {
         settings.clearPairing()
         pairing.value = pairingState()
-        message.value = "Mac unpaired"
+        message.value = Banner("Mac unpaired")
         RuntimeStatusStore.pairingChanged()
     }
 
-    fun setMessage(value: String?) {
-        message.value = value
+    fun setMessage(value: String?, transient: Boolean = false) {
+        message.value = value?.let { Banner(it, transient) }
     }
 
     private fun pairingState() = PairState(settings.isPaired, settings.host)

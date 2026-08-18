@@ -49,14 +49,21 @@ final class PeerSession {
 
     // MARK: - Sending
 
-    func send<T: Encodable>(_ message: T) {
+    /// `then` runs once the frame has been handed to the transport, successfully or not.
+    ///
+    /// Any caller that closes straight after sending *must* use it. `close()` cancels the
+    /// connection synchronously on `queue`, while the frame is only queued on it, so a
+    /// plain `send` followed by `close` is cancelled before it ever leaves the Mac — which
+    /// is exactly how every `hello.nack` used to be lost.
+    func send<T: Encodable>(_ message: T, then: (() -> Void)? = nil) {
         do {
             let data = try Wire.encode(message)
             queue.async { [weak self] in
-                self?.sendFrame(data, opcode: .text)
+                self?.sendFrame(data, opcode: .text, then: then)
             }
         } catch {
             Log.error("encode failed: \(error.localizedDescription)")
+            then?()
         }
     }
 
@@ -81,7 +88,8 @@ final class PeerSession {
         }
     }
 
-    private func sendFrame(_ data: Data, opcode: NWProtocolWebSocket.Opcode) {
+    private func sendFrame(_ data: Data, opcode: NWProtocolWebSocket.Opcode,
+                           then: (() -> Void)? = nil) {
         let meta = NWProtocolWebSocket.Metadata(opcode: opcode)
         let ctx = NWConnection.ContentContext(identifier: "frame", metadata: [meta])
         conn.send(content: data, contentContext: ctx, isComplete: true,
@@ -90,6 +98,7 @@ final class PeerSession {
                 Log.warn("send failed: \(error.localizedDescription)")
                 self?.finish(error)
             }
+            then?()
         })
     }
 

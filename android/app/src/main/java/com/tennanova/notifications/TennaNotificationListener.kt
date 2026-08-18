@@ -55,6 +55,8 @@ class TennaNotificationListener : NotificationListenerService() {
     private var networkCallbackRegistered = false
     private var allNetworksCallbackRegistered = false
     private var discoveredEndpoint: Pair<String, Int>? = null
+    /** Consecutive rounds in which every known address failed. Reset by `hello.ack`. */
+    private var exhaustedRounds = 0
 
     /** Reply/action plumbing for notifications currently on screen, keyed by SBN key. */
     private val actionMap = HashMap<String, List<Notification.Action>>()
@@ -186,13 +188,26 @@ class TennaNotificationListener : NotificationListenerService() {
                             "The Mac identity changed. Re-pair to continue."
                         )
                     }
+                    SocketClient.State.AUTH_FAILED -> {
+                        setAuthenticated(false)
+                        RuntimeStatusStore.updateConnection(
+                            ConnectionStatus.AUTH_FAILED,
+                            "The Mac rejected this pairing. Scan a fresh code on the Mac."
+                        )
+                    }
                     SocketClient.State.UNPAIRED -> {
                         setAuthenticated(false)
                         RuntimeStatusStore.updateConnection(ConnectionStatus.UNPAIRED)
                     }
                     SocketClient.State.DISCONNECTED -> {
                         setAuthenticated(false)
-                        RuntimeStatusStore.updateConnection(ConnectionStatus.DISCONNECTED)
+                        // Keeps any isolation hint from the previous exhausted round: this
+                        // fires before onEndpointsExhausted on the first round, but after
+                        // it on every one that follows, and passing null would blank it.
+                        RuntimeStatusStore.updateConnection(
+                            ConnectionStatus.DISCONNECTED,
+                            RuntimeStatusStore.state.value.connectionError
+                        )
                         adoptDiscoveredEndpointIfSafe()
                     }
                 }
@@ -211,6 +226,19 @@ class TennaNotificationListener : NotificationListenerService() {
      */
     private fun probeForMac() {
         if (!settings.isPaired) return
+        exhaustedRounds++
+        // mDNS answers are multicast, which a router with AP client isolation still
+        // forwards, while the unicast TCP connect they advertise is exactly what it
+        // blocks. Watching the Mac announce itself and still failing to reach it, round
+        // after round, is that signature — and "Mac offline" is a bad description of it,
+        // because the Mac is right there. USB is the way out, so say so.
+        if (discoveredEndpoint != null && exhaustedRounds >= ISOLATION_HINT_ROUNDS) {
+            RuntimeStatusStore.updateConnection(
+                ConnectionStatus.DISCONNECTED,
+                "Your Mac is on this network but the connection is being blocked — " +
+                    "many routers block device-to-device traffic. Connect the phone by USB."
+            )
+        }
         SubnetScanner.scan(this, settings.port) { found ->
             settings.rememberHosts(found)
             socket?.retryNow()
@@ -257,6 +285,8 @@ class TennaNotificationListener : NotificationListenerService() {
                     }
                 } == true
                 RuntimeStatusStore.updatePeerCapabilities(peerSupportsImages)
+                exhaustedRounds = 0
+                socket?.sessionAuthenticated()
                 setAuthenticated(true)
                 RuntimeStatusStore.updateConnection(ConnectionStatus.CONNECTED)
                 // Populate the Mac and rebuild action mappings only after authentication.
@@ -267,11 +297,13 @@ class TennaNotificationListener : NotificationListenerService() {
                 val reason = msg.optString("reason")
                 Log.e(TAG, "Mac rejected us: $reason")
                 setAuthenticated(false)
+                socket?.failAuthentication()
+                // After failAuthentication, whose state change carries only a generic
+                // message — this one names the reason the Mac actually gave.
                 RuntimeStatusStore.updateConnection(
                     ConnectionStatus.AUTH_FAILED,
-                    "Pairing was rejected ($reason). Pair again."
+                    "Pairing was rejected ($reason). Scan a fresh code on the Mac."
                 )
-                socket?.stop()
             }
 
             else -> if (!authenticated) {
@@ -608,6 +640,15 @@ class TennaNotificationListener : NotificationListenerService() {
      * as the Mac moves between a LAN and a hotspot.
      */
     private fun adoptReportedHosts(msg: JSONObject) {
+        // Authoritative, like `hosts`: present means use it, absent means the Mac has no
+        // USB tunnel right now. That is what lets plugging the phone in mid-session start
+        // working, and unplugging it stop being tried, without anyone rescanning the QR.
+        val reportedUsb = if (msg.has("usbPort")) msg.optInt("usbPort").takeIf { it in 1..65535 } else null
+        if (reportedUsb != settings.usbPort) {
+            settings.usbPort = reportedUsb
+            Log.i(TAG, if (reportedUsb != null) "Mac USB tunnel up on $reportedUsb" else "Mac USB tunnel down")
+        }
+
         val reported = PairingPayload.hostList(msg.optJSONArray("hosts"))
         if (reported.isEmpty()) return
         val port = msg.optInt("port", settings.port)
@@ -626,7 +667,6 @@ class TennaNotificationListener : NotificationListenerService() {
         // all over again — so only move while genuinely offline.
         if (socket?.isConnected == true) return
         if (current == host && settings.port == port) return
-        if (isLoopbackHost(current) && settings.usbPort == null) settings.usbPort = settings.port
         Log.i(TAG, "paired Mac rediscovered at $host:$port")
         // Remembered, not substituted: mDNS finds the Mac on one interface, and the
         // others in the list may be the ones that actually work.
@@ -635,15 +675,13 @@ class TennaNotificationListener : NotificationListenerService() {
         socket?.retryNow()
     }
 
-    private fun isLoopbackHost(host: String): Boolean =
-        host.equals("localhost", ignoreCase = true) || host == "127.0.0.1" ||
-            host == "::1" || host == "[::1]"
-
     companion object {
         private const val TAG = "TennaNova"
         private const val ICON_PX = 128
         /** Contact photos are the card's thumbnail, so they earn Retina pixels. */
         private const val AVATAR_PX = 256
         private const val MAX_ASSETS = 128
+        /** One failed round is just a roaming Mac; a run of them is the network. */
+        private const val ISOLATION_HINT_ROUNDS = 3
     }
 }

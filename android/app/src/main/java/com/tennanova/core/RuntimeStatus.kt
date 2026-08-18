@@ -15,7 +15,17 @@ enum class ConnectionStatus {
     AUTHENTICATING,
     CONNECTED,
     PIN_MISMATCH,
-    AUTH_FAILED
+    AUTH_FAILED;
+
+    /**
+     * The connection attempt has resolved, one way or the other.
+     *
+     * DISCONNECTED is deliberately excluded. It is also the state a paired phone sits in
+     * before its first attempt starts, so treating it as settled would clear a banner in
+     * the same breath it was set.
+     */
+    val isSettled: Boolean
+        get() = this == CONNECTED || this == AUTH_FAILED || this == PIN_MISMATCH
 }
 
 data class RuntimeSnapshot(

@@ -84,11 +84,13 @@ rather than guessing.
 // Mac -> Android
 {"v":1,"type":"hello.ack","ok":true,"deviceToken":"<issued on first pair>",
  "macName":"Daniel's MacBook","hosts":["192.168.1.42","192.168.43.37"],"port":18777,
- "capabilities":["clip.image.v1"]}
+ "usbPort":18777,"capabilities":["clip.image.v1"]}
 
-// Mac -> Android, the address list changed mid-session (it joined a hotspot, say).
+// Mac -> Android, the address list changed mid-session (it joined a hotspot, say),
+// or the USB tunnel came up or went away.
 // Optional and ignorable: a phone that skips it simply keeps the hello.ack list.
-{"v":1,"type":"mac.hosts","hosts":["192.168.1.42","192.168.43.37"],"port":18777}
+{"v":1,"type":"mac.hosts","hosts":["192.168.1.42","192.168.43.37"],"port":18777,
+ "usbPort":18777}
 
 // Mac -> Android, refusal (bad token, version mismatch)
 {"v":1,"type":"hello.nack","reason":"bad_token|version_mismatch"}
@@ -96,6 +98,18 @@ rather than guessing.
 // Android -> Mac, optional state refresh (battery is also present in hello)
 {"v":1,"type":"device.state","battery":74,"charging":true,"dnd":false}
 ```
+
+`usbPort` is authoritative in exactly the same way `hosts` is: present means the `adb reverse`
+tunnel is up, **absent means there is no USB tunnel right now** — not "unchanged". It has to
+travel on the wire and not only in the pairing QR, because the tunnel normally comes up *after*
+pairing: a phone is plugged in once it is already paired. A QR-only `usbPort` means a phone
+paired while unplugged can never learn the USB endpoint, which on a network with AP client
+isolation leaves it with no route to the Mac at all.
+
+That still leaves the case where the phone cannot establish any session to be told. So when the
+phone has no known `usbPort`, it appends `127.0.0.1:port` to its candidate list as the **last**
+entry, after every real address has failed. That costs one 1s timeout only in the situation
+where nothing else works.
 
 `hosts` is the Mac's complete account of where it can be reached, so the phone **replaces**
 its list with it rather than merging — that is what stops dead addresses accumulating as

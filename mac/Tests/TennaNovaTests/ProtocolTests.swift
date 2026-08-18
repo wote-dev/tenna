@@ -12,6 +12,29 @@ struct ProtocolTests {
         #expect(decoded.name == "shot.png")
     }
 
+    @Test func usbPortIsOmittedWhenTheTunnelIsDown() throws {
+        // Absence is meaningful: the phone reads a missing usbPort as "no USB right now"
+        // and drops any loopback endpoint it was holding. Encoding a null would be read
+        // the same way, but a key that is simply absent is what older builds already emit.
+        let json = String(data: try Wire.encode(MacHosts(hosts: ["10.0.0.2"], port: 18777)),
+                          encoding: .utf8)!
+        #expect(!json.contains("usbPort"))
+    }
+
+    @Test func usbPortSurvivesTheWireOnHostsAndAck() throws {
+        let hosts = try Wire.decode(
+            MacHosts.self,
+            from: Wire.encode(MacHosts(hosts: ["10.0.0.2"], port: 18777, usbPort: 18777))
+        )
+        #expect(hosts.usbPort == 18777)
+
+        let ack = try Wire.decode(
+            HelloAck.self,
+            from: Wire.encode(HelloAck(deviceToken: nil, macName: "Mac", usbPort: 18777))
+        )
+        #expect(ack.usbPort == 18777)
+    }
+
     @Test func helloAckAdvertisesImageCapability() throws {
         let ack = HelloAck(deviceToken: nil, macName: "Mac")
         let decoded = try Wire.decode(HelloAck.self, from: Wire.encode(ack))

@@ -35,6 +35,10 @@ final class AppState {
     private(set) var lastTransferStatus: String?
     private(set) var usbStatus: USBBridgeStatus = .searching
 
+    /// Whether a phone is paired at all. Distinct from `pairedDevice`, which is cleared
+    /// on every disconnect — this is what lets the menu bar offer Unpair while offline.
+    private(set) var isPaired: Bool = false
+
     /// Shown as a QR until the phone pairs. Regenerated each launch while unpaired.
     private(set) var pairingPayload: String = ""
 
@@ -115,14 +119,23 @@ final class AppState {
 
             try server.start()
             usbBridge.onStatus = { [weak self] status in
-                Task { @MainActor in self?.usbStatus = status }
+                Task { @MainActor in
+                    guard let self else { return }
+                    let wasReady = self.usbStatus.isReady
+                    self.usbStatus = status
+                    // The QR only advertises usbPort while the tunnel is genuinely up,
+                    // so it has to be rebuilt when that changes in either direction — and
+                    // a phone that is already connected over LAN is told too, so plugging
+                    // in starts working without anyone rescanning anything.
+                    if wasReady != status.isReady {
+                        self.rebuildPairingPayload()
+                        self.sendHostsUpdate()
+                    }
+                }
             }
             usbBridge.start(port: Int(server.port))
-            rebuildPairingPayload(
-                spki: server.spkiHash,
-                port: server.port,
-                usbPort: usbBridge.isAvailable ? Int(server.port) : nil
-            )
+            isPaired = store.paired != nil
+            rebuildPairingPayload()
             startPathMonitor()
             status = .waitingForPhone
             presenter.requestAuthorization()
@@ -144,14 +157,9 @@ final class AppState {
     func unpair() {
         store.clear()
         store.rotatePairingToken()
-        if let server {
-            rebuildPairingPayload(
-                spki: server.spkiHash,
-                port: server.port,
-                usbPort: usbBridge.isAvailable ? Int(server.port) : nil
-            )
-        }
+        rebuildPairingPayload()
         server?.session?.close()
+        isPaired = false
         pairedDevice = nil
         status = .waitingForPhone
     }
@@ -219,7 +227,7 @@ final class AppState {
 
     private func handleHello(data: Data, session: PeerSession) {
         guard let hello = try? Wire.decode(Hello.self, from: data) else {
-            session.send(HelloNack(reason: "bad_hello"))
+            session.send(HelloNack(reason: "bad_hello")) { session.close() }
             return
         }
 
@@ -238,8 +246,7 @@ final class AppState {
             Log.info("paired with \(hello.device.name)")
         } else {
             Log.warn("rejecting \(hello.device.name): bad token")
-            session.send(HelloNack(reason: "bad_token"))
-            session.close()
+            session.send(HelloNack(reason: "bad_token")) { session.close() }
             return
         }
 
@@ -250,17 +257,25 @@ final class AppState {
             peerCapabilities.contains(Proto.imageClipboardCapability)
         )
 
+        let macPort = Int(server?.port ?? Proto.defaultPort)
         session.send(HelloAck(
             deviceToken: issued,
             macName: Host.current().localizedName ?? "Mac",
             hosts: advertisedHosts,
-            port: Int(server?.port ?? Proto.defaultPort)
+            port: macPort,
+            usbPort: usbStatus.isReady ? macPort : nil
         ))
 
+        let didPair = issued != nil
         Task { @MainActor in
             self.pairedDevice = hello.device
             self.battery = hello.device.battery
             self.status = .connected(deviceName: hello.device.name)
+            self.isPaired = true
+            // The pairing token was just spent and rotated. Without rebuilding here the
+            // menu bar keeps rendering a QR for the dead one, and the next scan — which
+            // is exactly what a user does when the phone drops — fails with bad_token.
+            if didPair { self.rebuildPairingPayload() }
         }
 
         // Push our current clipboard so the phone starts in sync.
@@ -325,19 +340,33 @@ final class AppState {
 
     @MainActor
     private func republishAddresses() {
-        guard let server else { return }
+        guard server != nil else { return }
         let before = advertisedHosts
-        rebuildPairingPayload(
-            spki: server.spkiHash,
-            port: server.port,
-            usbPort: usbBridge.isAvailable ? Int(server.port) : nil
-        )
+        rebuildPairingPayload()
         guard advertisedHosts != before else { return }
         Log.info("reachable on \(advertisedHosts.isEmpty ? "no address" : advertisedHosts.joined(separator: ", "))")
-        send(MacHosts(hosts: advertisedHosts, port: Int(server.port)))
+        sendHostsUpdate()
     }
 
-    private func rebuildPairingPayload(spki: String, port: UInt16, usbPort: Int?) {
+    /// Hands a live session the Mac's complete account of where it can be reached.
+    ///
+    /// Separate from `republishAddresses` because USB readiness changes without any LAN
+    /// address changing, and that early-returns on an unchanged host list.
+    @MainActor
+    private func sendHostsUpdate() {
+        guard let server else { return }
+        send(MacHosts(hosts: advertisedHosts,
+                      port: Int(server.port),
+                      usbPort: usbStatus.isReady ? Int(server.port) : nil))
+    }
+
+    /// Rebuilds the QR from the live server identity, addresses, token and USB state.
+    ///
+    /// Must be called whenever any of those change. The token in particular: it rotates
+    /// the moment a pair succeeds, and a QR left showing the spent one is indistinguishable
+    /// from a working one until the phone is already being rejected.
+    private func rebuildPairingPayload() {
+        guard let server else { return }
         advertisedHosts = NetworkInterface.allIPv4()
         // `host` stays the single best guess so an older phone build still pairs; `hosts`
         // is the additive list every current build actually walks.
@@ -345,11 +374,14 @@ final class AppState {
             "v": Proto.version,
             "host": advertisedHosts.first ?? "0.0.0.0",
             "hosts": advertisedHosts,
-            "port": Int(port),
-            "spki": spki,
+            "port": Int(server.port),
+            "spki": server.spkiHash,
             "token": store.pairingToken
         ]
-        if let usbPort { payload["usbPort"] = usbPort }
+        // Only while the reverse tunnel is actually up. `usbBridge.isAvailable` just means
+        // the adb binary is bundled, so it stayed true with no phone attached — and the
+        // phone then spent its first connection attempt on a loopback port nothing served.
+        if usbStatus.isReady { payload["usbPort"] = Int(server.port) }
         if let data = try? JSONSerialization.data(withJSONObject: payload),
            let str = String(data: data, encoding: .utf8) {
             pairingPayload = str

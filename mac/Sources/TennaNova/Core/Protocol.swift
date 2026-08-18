@@ -51,6 +51,9 @@ struct HelloAck: Codable {
     /// anyone rescanning the pairing QR.
     var hosts: [String] = []
     var port: Int = Int(Proto.defaultPort)
+    /// See `MacHosts.usbPort`. Repeated here so a reconnecting phone re-learns the USB
+    /// endpoint immediately rather than waiting for the next address change.
+    var usbPort: Int?
     var capabilities: [String] = [Proto.imageClipboardCapability]
 }
 
@@ -62,6 +65,17 @@ struct MacHosts: Codable {
     var type = "mac.hosts"
     var hosts: [String]
     var port: Int
+    /// The loopback port, present only while the `adb reverse` tunnel is actually up.
+    ///
+    /// It has to travel here and not only in the pairing QR. The tunnel normally comes up
+    /// *after* pairing — a phone gets plugged in once it is already paired — so a QR-only
+    /// `usbPort` means a phone paired while unplugged can never learn the USB endpoint at
+    /// all. On a network with AP client isolation that leaves it with no route to the Mac.
+    ///
+    /// Absent means "no USB right now", not "unchanged": like `hosts`, this message is the
+    /// Mac's complete account of where it can be reached, so the phone replaces rather
+    /// than merges.
+    var usbPort: Int?
 }
 
 struct HelloNack: Codable {
