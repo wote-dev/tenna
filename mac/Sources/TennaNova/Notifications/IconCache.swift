@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 /// Content-addressed store of the PNGs the phone sends — app icons and contact photos
 /// alike. Each one crosses the wire once, ever.
@@ -24,6 +25,31 @@ final class IconCache {
 
     func store(_ data: Data, hash: String) {
         try? data.write(to: url(for: hash), options: .atomic)
+    }
+
+    func image(for hash: String) -> NSImage? {
+        let url = url(for: hash)
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        return NSImage(contentsOf: url)
+    }
+
+    /// Bounds the directory, which was unbounded — every distinct app icon the phone has
+    /// ever sent stayed forever. Contact photos make that materially worse: there is one
+    /// per sender, at twice the pixels.
+    func prune(keeping limit: Int = 512) {
+        let keys: [URLResourceKey] = [.contentAccessDateKey, .isRegularFileKey]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: dir, includingPropertiesForKeys: keys
+        ), files.count > limit else { return }
+
+        let byAge = files.sorted {
+            let a = (try? $0.resourceValues(forKeys: [.contentAccessDateKey]))?.contentAccessDate
+            let b = (try? $1.resourceValues(forKeys: [.contentAccessDateKey]))?.contentAccessDate
+            return (a ?? .distantPast) < (b ?? .distantPast)
+        }
+        for url in byAge.prefix(files.count - limit) {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     /// UNNotificationAttachment *moves* the file it is handed into its own data store,

@@ -3,6 +3,7 @@ import SwiftUI
 struct MenuBarView: View {
     @Bindable var state: AppState
     @State private var copied = false
+    @State private var showPairingAnyway = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -12,6 +13,11 @@ struct MenuBarView: View {
 
             if state.status.isConnected {
                 connectedBody
+            } else if state.isPaired && !showPairingAnyway {
+                // Not the QR. A paired phone that is merely offline used to land here and
+                // be shown a pairing code, which reads as "you are not paired" and sends
+                // people off to re-pair a pairing that was never the problem.
+                waitingBody
             } else {
                 pairingBody
             }
@@ -39,7 +45,9 @@ struct MenuBarView: View {
                 .frame(width: 8, height: 8)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Tennanova").font(.headline)
-                Text(state.status.label)
+                Text(state.isPaired && !state.status.isConnected
+                     ? "Paired · reconnecting"
+                     : state.status.label)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -62,27 +70,57 @@ struct MenuBarView: View {
         }
     }
 
+    /// Paired, but nothing has connected. The useful thing to show is *where* this Mac
+    /// can be reached, because the usual cause is the two devices being on networks that
+    /// cannot see each other.
+    private var waitingBody: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Paired with \(state.pairedDeviceName ?? "your phone")",
+                  systemImage: "iphone")
+                .font(.callout)
+
+            Label(
+                state.advertisedHosts.isEmpty
+                    ? "Waiting for a local network address."
+                    : "Ready on \(state.advertisedHosts.joined(separator: ", "))",
+                systemImage: "network"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Label(state.usbStatus.label,
+                  systemImage: state.usbStatus.isReady ? "cable.connector" : "wifi")
+                .font(.caption)
+                .foregroundStyle(state.usbStatus.isReady ? Color.green : Color.secondary)
+
+            if !state.usbStatus.isReady {
+                Text("Your phone must be able to reach one of those addresses. Many "
+                     + "networks block device-to-device traffic — a USB cable or the "
+                     + "phone's hotspot gets around that.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Button("Show pairing code") { showPairingAnyway = true }
+                .font(.caption)
+        }
+    }
+
     private var pairingBody: some View {
         VStack(alignment: .leading, spacing: 10) {
             Text("Scan this with Tennanova on your phone")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            // Pairing with the tunnel down used to be silently different: the code carries
-            // no usbPort, and on a network that blocks device-to-device traffic that is the
-            // difference between a phone that connects and one that never can. The phone
-            // now guesses loopback as a last resort and the Mac re-advertises the port when
-            // the tunnel appears, but plugging in first is still the way to get it right.
-            if !state.usbStatus.isReady {
-                Label(
-                    "No USB tunnel — this code is LAN-only. Plug the phone in first if your "
-                        + "network blocks device-to-device traffic.",
-                    systemImage: "exclamationmark.triangle"
-                )
-                .font(.caption)
-                .foregroundStyle(.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            }
+            Label(
+                "Works on any local network shared by this Mac and your phone.",
+                systemImage: "network"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .fixedSize(horizontal: false, vertical: true)
 
             if let img = QRCode.image(from: state.pairingPayload) {
                 Image(nsImage: img)

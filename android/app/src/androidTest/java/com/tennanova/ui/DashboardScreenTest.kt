@@ -36,10 +36,11 @@ class DashboardScreenTest {
         compose.onNodeWithText("Notification mirroring").assertIsDisplayed()
     }
 
-    @Test fun connectingStateIsLive() {
+    @Test fun connectingStateExplainsPendingPairing() {
         render(MainUiState(paired = true, host = "mac.local",
             connection = ConnectionStatus.CONNECTING))
-        compose.onNodeWithText("Connecting…").assertIsDisplayed()
+        compose.onNodeWithText("Finishing pairing…").assertIsDisplayed()
+        compose.onNodeWithText("Pairing pending").assertIsDisplayed()
     }
 
     @Test fun connectedStateIncludesImageCapability() {

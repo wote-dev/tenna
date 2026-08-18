@@ -29,6 +29,8 @@ import com.tennanova.clipboard.ClipboardAccessStatus
 import com.tennanova.clipboard.TennaAccessibilityService
 import com.tennanova.core.PairingPayload
 import com.tennanova.core.Settings
+import com.tennanova.net.ConnectionEndpoint
+import com.tennanova.net.DiscoveredEndpoint
 import com.tennanova.net.SocketClient
 import com.tennanova.net.MacDiscovery
 import com.tennanova.net.SubnetScanner
@@ -54,7 +56,9 @@ class TennaNotificationListener : NotificationListenerService() {
     private var pendingImage: ClipImageHeader? = null
     private var networkCallbackRegistered = false
     private var allNetworksCallbackRegistered = false
-    private var discoveredEndpoint: Pair<String, Int>? = null
+    /** Live all-network NSD results. Unlike persisted hosts these retain their exact route. */
+    @Volatile
+    private var discoveredEndpoints: List<DiscoveredEndpoint> = emptyList()
     /** Consecutive rounds in which every known address failed. Reset by `hello.ack`. */
     private var exhaustedRounds = 0
 
@@ -96,11 +100,16 @@ class TennaNotificationListener : NotificationListenerService() {
     override fun onCreate() {
         super.onCreate()
         settings = Settings(this)
-        discovery = MacDiscovery(this) { host, port ->
-            discoveredEndpoint = host to port
-            adoptDiscoveredEndpointIfSafe()
+        discovery = MacDiscovery(this, expectedSpki = { settings.spki }) { endpoints ->
+            discoveredEndpoints = endpoints
+            val currentPort = settings.port
+            settings.rememberHosts(endpoints.filter { it.port == currentPort }.map { it.host })
+            // retryNow refuses to disturb an authenticated socket. While offline it
+            // cancels stale address attempts and takes the newly resolved route at once.
+            socket?.retryNow()
         }
         RuntimeStatusStore.attach(this)
+        RuntimeStatusStore.updatePairing(settings.isPairingConfirmed, settings.macName)
         RuntimeStatusStore.updateClipboard(
             if (TennaAccessibilityService.isEnabled(this)) ClipboardAccessStatus.READY
             else ClipboardAccessStatus.NEEDS_ACCESSIBILITY
@@ -170,6 +179,11 @@ class TennaNotificationListener : NotificationListenerService() {
             onMessage = ::handleMessage,
             onBinary = ::handleBinary,
             onEndpointsExhausted = ::probeForMac,
+            discoveredEndpoints = {
+                discoveredEndpoints.map {
+                    ConnectionEndpoint(it.host, it.port, isUsb = false, network = it.network)
+                }
+            },
             onStateChange = { state ->
                 when (state) {
                     SocketClient.State.CONNECTED -> {
@@ -179,7 +193,12 @@ class TennaNotificationListener : NotificationListenerService() {
                     }
                     SocketClient.State.CONNECTING -> {
                         setAuthenticated(false)
-                        RuntimeStatusStore.updateConnection(ConnectionStatus.CONNECTING)
+                        // A diagnostic found after several failed rounds must not flash
+                        // away for every automatic retry and then reappear seconds later.
+                        RuntimeStatusStore.updateConnection(
+                            ConnectionStatus.CONNECTING,
+                            RuntimeStatusStore.state.value.connectionError
+                        )
                     }
                     SocketClient.State.PIN_MISMATCH -> {
                         setAuthenticated(false)
@@ -208,7 +227,6 @@ class TennaNotificationListener : NotificationListenerService() {
                             ConnectionStatus.DISCONNECTED,
                             RuntimeStatusStore.state.value.connectionError
                         )
-                        adoptDiscoveredEndpointIfSafe()
                     }
                 }
             }
@@ -232,7 +250,7 @@ class TennaNotificationListener : NotificationListenerService() {
         // blocks. Watching the Mac announce itself and still failing to reach it, round
         // after round, is that signature — and "Mac offline" is a bad description of it,
         // because the Mac is right there. USB is the way out, so say so.
-        if (discoveredEndpoint != null && exhaustedRounds >= ISOLATION_HINT_ROUNDS) {
+        if (discoveredEndpoints.isNotEmpty() && exhaustedRounds >= ISOLATION_HINT_ROUNDS) {
             RuntimeStatusStore.updateConnection(
                 ConnectionStatus.DISCONNECTED,
                 "Your Mac is on this network but the connection is being blocked — " +
@@ -248,6 +266,11 @@ class TennaNotificationListener : NotificationListenerService() {
     /** Called by the UI after a successful QR pair. */
     fun onPairingChanged() {
         setAuthenticated(false)
+        RuntimeStatusStore.updatePairing(settings.isPairingConfirmed, settings.macName)
+        RuntimeStatusStore.updateConnection(
+            if (settings.isPaired) ConnectionStatus.DISCONNECTED
+            else ConnectionStatus.UNPAIRED
+        )
         // A different Mac may push different content; don't suppress its first write.
         ClipboardWriter.reset()
         if (settings.isPaired) discovery.start() else discovery.stop()
@@ -278,6 +301,10 @@ class TennaNotificationListener : NotificationListenerService() {
                     settings.pairingToken = null
                     Log.i(TAG, "paired — long-lived token stored")
                 }
+                msg.optString("macName").takeIf { it.isNotBlank() }?.let {
+                    settings.macName = it
+                }
+                RuntimeStatusStore.updatePairing(true, settings.macName)
                 adoptReportedHosts(msg)
                 peerSupportsImages = msg.optJSONArray("capabilities")?.let { array ->
                     (0 until array.length()).any {
@@ -655,24 +682,6 @@ class TennaNotificationListener : NotificationListenerService() {
         if (port in 1..65535 && port != settings.port) settings.port = port
         settings.replaceHosts(reported)
         Log.i(TAG, "Mac reachable at ${reported.joinToString(", ")}")
-    }
-
-    /** NSD updates only the LAN endpoint; the optional USB loopback endpoint is independent. */
-    private fun adoptDiscoveredEndpointIfSafe() {
-        val (host, port) = discoveredEndpoint ?: return
-        val current = settings.host ?: return
-        if (!settings.isPaired || authenticated) return
-        // Bonjour keeps resolving while a session is alive. Switching endpoints under a
-        // live socket means cancelling it, and the phone would then rediscover and do it
-        // all over again — so only move while genuinely offline.
-        if (socket?.isConnected == true) return
-        if (current == host && settings.port == port) return
-        Log.i(TAG, "paired Mac rediscovered at $host:$port")
-        // Remembered, not substituted: mDNS finds the Mac on one interface, and the
-        // others in the list may be the ones that actually work.
-        settings.port = port
-        settings.promoteHost(host)
-        socket?.retryNow()
     }
 
     companion object {

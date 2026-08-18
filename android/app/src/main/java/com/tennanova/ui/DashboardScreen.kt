@@ -95,7 +95,7 @@ internal fun DashboardScreen(
             if (!state.paired) {
                 PairingCard(onScanQr) { showManualPair = true }
             } else {
-                PairedRow(state.host.orEmpty()) { showUnpair = true }
+                PairedRow(state) { showUnpair = true }
             }
 
             if (!everythingGranted) {
@@ -175,22 +175,7 @@ private fun DashboardTopBar() {
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ConnectionHero(state: MainUiState) {
-    val (title, detail) = when (state.connection) {
-        ConnectionStatus.CONNECTED ->
-            "Connected" to "Your phone and Mac are in sync."
-        ConnectionStatus.CONNECTING ->
-            "Connecting…" to "Looking for your paired Mac."
-        ConnectionStatus.AUTHENTICATING ->
-            "Securing connection…" to "Verifying your paired Mac."
-        ConnectionStatus.PIN_MISMATCH ->
-            "Mac identity changed" to "Re-pair before syncing again."
-        ConnectionStatus.AUTH_FAILED ->
-            "Pairing rejected" to "Scan a fresh code from the Mac."
-        ConnectionStatus.DISCONNECTED ->
-            "Mac offline" to "Sync resumes automatically when it is reachable."
-        ConnectionStatus.UNPAIRED ->
-            "Pair your Mac" to "Connect once to sync notifications, text and images."
-    }
+    val (title, detail) = connectionCopy(state)
     val accent = connectionAccent(state.connection)
 
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -223,14 +208,33 @@ private fun ConnectionHero(state: MainUiState) {
     }
 }
 
+/** Internal transport phases intentionally collapse to one calm, user-facing state. */
+internal fun connectionCopy(state: MainUiState): Pair<String, String> = when (state.connection) {
+    ConnectionStatus.CONNECTED ->
+        "Connected" to "Your phone and Mac are in sync."
+    ConnectionStatus.CONNECTING,
+    ConnectionStatus.AUTHENTICATING,
+    ConnectionStatus.DISCONNECTED -> if (state.pairingConfirmed) {
+        "Reconnecting…" to "Searching every shared network for your paired Mac."
+    } else {
+        "Finishing pairing…" to "Searching every shared network for your Mac."
+    }
+    ConnectionStatus.PIN_MISMATCH ->
+        "Mac identity changed" to "Re-pair before syncing again."
+    ConnectionStatus.AUTH_FAILED ->
+        "Pairing rejected" to "Scan a fresh code from the Mac."
+    ConnectionStatus.UNPAIRED ->
+        "Pair your Mac" to "Connect once to sync notifications, text and images."
+}
+
 @Composable
 private fun connectionAccent(status: ConnectionStatus): Color = when (status) {
     ConnectionStatus.CONNECTED -> MaterialTheme.colorScheme.primary
     ConnectionStatus.CONNECTING,
-    ConnectionStatus.AUTHENTICATING -> MaterialTheme.colorScheme.tertiary
+    ConnectionStatus.AUTHENTICATING,
+    ConnectionStatus.DISCONNECTED -> MaterialTheme.colorScheme.tertiary
     ConnectionStatus.PIN_MISMATCH,
     ConnectionStatus.AUTH_FAILED -> MaterialTheme.colorScheme.error
-    ConnectionStatus.DISCONNECTED,
     ConnectionStatus.UNPAIRED -> MaterialTheme.colorScheme.onSurfaceVariant
 }
 
@@ -311,13 +315,20 @@ private fun PairingCard(onScan: () -> Unit, onManual: () -> Unit) {
 }
 
 @Composable
-private fun PairedRow(host: String, onUnpair: () -> Unit) {
+private fun PairedRow(state: MainUiState, onUnpair: () -> Unit) {
     ListItem(
         headlineContent = {
-            Text("Paired Mac", fontWeight = FontWeight.Medium)
+            Text(
+                if (state.pairingConfirmed) "Paired Mac" else "Pairing pending",
+                fontWeight = FontWeight.Medium
+            )
         },
         supportingContent = {
-            Text(host, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(
+                state.macName ?: state.host.orEmpty(),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
         },
         leadingContent = {
             Icon(

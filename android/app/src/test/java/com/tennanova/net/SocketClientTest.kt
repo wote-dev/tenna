@@ -64,6 +64,24 @@ class SocketClientTest {
         )
     }
 
+    @Test fun freshlyDiscoveredAddressLeadsRememberedAddresses() {
+        val live = ConnectionEndpoint("192.168.210.196", 18777, isUsb = false)
+
+        assertEquals(
+            listOf(
+                live,
+                ConnectionEndpoint("192.168.1.20", 18777, isUsb = false),
+                ConnectionEndpoint("127.0.0.1", 18777, isUsb = true)
+            ),
+            buildEndpointCandidates(
+                lanHosts = listOf("192.168.1.20"),
+                lanPort = 18777,
+                usbPort = null,
+                discovered = listOf(live)
+            )
+        )
+    }
+
     @Test fun repeatedAddressesCollapse() {
         assertEquals(
             listOf(

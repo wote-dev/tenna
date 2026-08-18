@@ -15,9 +15,13 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 data class MainUiState(
     val paired: Boolean = false,
+    val pairingConfirmed: Boolean = false,
+    val macName: String? = null,
     val host: String? = null,
     val listenerEnabled: Boolean = false,
     val accessibilityEnabled: Boolean = false,
@@ -52,11 +56,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
      */
     private data class Banner(val text: String, val transient: Boolean = false)
 
+    /**
+     * Shows a banner, and makes sure a transient one cannot outlive its attempt.
+     *
+     * Clearing on a settled connection is not enough on its own. DISCONNECTED is
+     * deliberately not "settled" — it is also the state a paired phone sits in before its
+     * first attempt begins, so treating it as settled would clear the banner in the same
+     * breath it was set. But that leaves the case this exists for: a phone that never
+     * reaches the Mac at all stays DISCONNECTED forever, and "Setup complete." sat under
+     * "Mac offline" indefinitely. A timer covers every outcome without the race.
+     */
+    private fun show(banner: Banner?) {
+        message.value = banner
+        if (banner?.transient != true) return
+        viewModelScope.launch {
+            delay(TRANSIENT_BANNER_MS)
+            // Identity, not equality: a newer banner must not be cleared by an older timer.
+            if (message.value === banner) message.value = null
+        }
+    }
+
     val uiState = combine(
         pairing, listenerEnabled, accessibilityEnabled, RuntimeStatusStore.state, message
     ) { pair, listener, accessibility, runtime, localMessage ->
         MainUiState(
             paired = pair.paired,
+            pairingConfirmed = pair.confirmed || runtime.pairingConfirmed,
+            macName = runtime.macName ?: pair.macName,
             host = pair.host,
             listenerEnabled = listener,
             accessibilityEnabled = accessibility,
@@ -109,27 +135,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun pair(raw: String): Boolean {
         val payload = PairingPayload.parse(raw.trim())
         if (payload == null) {
-            message.value = Banner("That pairing code is invalid or incomplete.")
+            show(Banner("That pairing code is invalid or incomplete."))
             return false
         }
         settings.savePairing(payload)
+        RuntimeStatusStore.updatePairing(false, null)
         pairing.value = pairingState()
-        message.value = Banner("Pairing saved.", transient = true)
+        show(Banner("Pairing saved.", transient = true))
         RuntimeStatusStore.pairingChanged()
         return true
     }
 
     fun unpair() {
         settings.clearPairing()
+        RuntimeStatusStore.updatePairing(false, null)
         pairing.value = pairingState()
-        message.value = Banner("Mac unpaired")
+        show(Banner("Mac unpaired"))
         RuntimeStatusStore.pairingChanged()
     }
 
     fun setMessage(value: String?, transient: Boolean = false) {
-        message.value = value?.let { Banner(it, transient) }
+        show(value?.let { Banner(it, transient) })
     }
 
-    private fun pairingState() = PairState(settings.isPaired, settings.host)
-    private data class PairState(val paired: Boolean, val host: String?)
+    private fun pairingState() = PairState(
+        settings.isPaired,
+        settings.isPairingConfirmed,
+        settings.macName,
+        settings.host
+    )
+    private data class PairState(
+        val paired: Boolean,
+        val confirmed: Boolean,
+        val macName: String?,
+        val host: String?
+    )
+
+    private companion object {
+        /** Long enough to read, short enough never to look like live status. */
+        const val TRANSIENT_BANNER_MS = 12_000L
+    }
 }

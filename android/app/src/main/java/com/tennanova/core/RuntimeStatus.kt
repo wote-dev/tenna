@@ -6,6 +6,7 @@ import com.tennanova.notifications.TennaNotificationListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import java.lang.ref.WeakReference
 
 enum class ConnectionStatus {
@@ -30,6 +31,8 @@ enum class ConnectionStatus {
 
 data class RuntimeSnapshot(
     val connection: ConnectionStatus = ConnectionStatus.UNPAIRED,
+    val pairingConfirmed: Boolean = false,
+    val macName: String? = null,
     val clipboard: ClipboardAccessStatus = ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
     val peerSupportsImages: Boolean = false,
     val lastTransfer: String? = null,
@@ -55,19 +58,23 @@ object RuntimeStatusStore {
     }
 
     fun updateConnection(status: ConnectionStatus, error: String? = null) {
-        mutable.value = mutable.value.copy(connection = status, connectionError = error)
+        mutable.update { it.copy(connection = status, connectionError = error) }
+    }
+
+    fun updatePairing(confirmed: Boolean, macName: String?) {
+        mutable.update { it.copy(pairingConfirmed = confirmed, macName = macName) }
     }
 
     fun updateClipboard(status: ClipboardAccessStatus, error: String? = null) {
-        mutable.value = mutable.value.copy(clipboard = status, clipboardError = error)
+        mutable.update { it.copy(clipboard = status, clipboardError = error) }
     }
 
     fun updatePeerCapabilities(supportsImages: Boolean) {
-        mutable.value = mutable.value.copy(peerSupportsImages = supportsImages)
+        mutable.update { it.copy(peerSupportsImages = supportsImages) }
     }
 
     fun transfer(message: String, error: String? = null) {
-        mutable.value = mutable.value.copy(lastTransfer = message, transferError = error)
+        mutable.update { it.copy(lastTransfer = message, transferError = error) }
     }
 
     fun clipboardChanged(payload: ClipboardPayload): Boolean = serviceRef.get()?.let {

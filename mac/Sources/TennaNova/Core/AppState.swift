@@ -39,6 +39,10 @@ final class AppState {
     /// on every disconnect — this is what lets the menu bar offer Unpair while offline.
     private(set) var isPaired: Bool = false
 
+    /// The paired phone's name, surviving disconnect. `pairedDevice` does not, so without
+    /// this the menu bar cannot say *which* phone it is waiting for.
+    private(set) var pairedDeviceName: String?
+
     /// Shown as a QR until the phone pairs. Regenerated each launch while unpaired.
     private(set) var pairingPayload: String = ""
 
@@ -78,7 +82,7 @@ final class AppState {
             let server = try Server()
             self.server = server
 
-            let presenter = NotificationPresenter()
+            let presenter = NotificationPresenter(icons: icons)
             presenter.onReply = { [weak self] key, actionId, text in
                 self?.send(NotifReply(key: key, actionId: actionId, text: text))
             }
@@ -117,6 +121,7 @@ final class AppState {
                 self.authenticatedSessionID = nil
                 self.peerCapabilities.removeAll()
                 self.pendingBinary = nil
+                self.iconRequests.reset()
                 self.clipboard?.setPeerSupportsImages(false)
                 Task { @MainActor in
                     self.capabilities = []
@@ -149,6 +154,7 @@ final class AppState {
             }
             usbBridge.start(port: Int(server.port))
             isPaired = store.paired != nil
+            pairedDeviceName = store.paired?.name
             rebuildPairingPayload()
             startPathMonitor()
             status = .waitingForPhone
@@ -174,8 +180,11 @@ final class AppState {
         rebuildPairingPayload()
         server?.session?.close()
         isPaired = false
+        pairedDeviceName = nil
         pairedDevice = nil
         status = .waitingForPhone
+        // A different phone's conversations must not survive into the next pairing.
+        history.clearAll()
     }
 
     // MARK: - Message routing
@@ -201,11 +210,18 @@ final class AppState {
 
         case "notif.posted":
             if let m = try? Wire.decode(NotifPosted.self, from: data) {
+                // The store ingests even when the presenter suppresses a resync replay —
+                // that is exactly what repopulates a Mac that restarted while the phone
+                // stayed connected.
+                history.ingest(m)
+                requestAssets(for: m)
                 notifications?.present(m)
             }
 
         case "notif.removed":
             if let m = try? Wire.decode(NotifRemoved.self, from: data) {
+                // Withdraw the card, keep the transcript.
+                history.markRemovedOnPhone(key: m.key)
                 notifications?.withdraw(key: m.key)
             }
 
@@ -265,6 +281,7 @@ final class AppState {
         }
 
         authenticatedSessionID = session.id
+        server?.activate(session)
         let caps = Set(hello.capabilities ?? [])
         peerCapabilities = caps
         pendingBinary = nil
@@ -287,6 +304,7 @@ final class AppState {
             self.battery = hello.device.battery
             self.status = .connected(deviceName: hello.device.name)
             self.isPaired = true
+            self.pairedDeviceName = hello.device.name
             self.capabilities = caps
             // The pairing token was just spent and rotated. Without rebuilding here the
             // menu bar keeps rendering a QR for the dead one, and the next scan — which
@@ -313,6 +331,9 @@ final class AppState {
                 return
             }
             notifications?.receiveIconBytes(data, hash: hash)
+            // The hash starts fresh if it is ever needed again, and the window is told so
+            // rows holding this icon or avatar can redraw.
+            iconRequests.received(hash)
 
         case .image(let sessionID, let header):
             guard sessionID == session.id, data.count == header.bytes,
@@ -328,6 +349,53 @@ final class AppState {
 
     /// Returns false when there is no authenticated session, so a caller that owes the
     /// user feedback — a reply typed into the window — can say so instead of dropping it.
+    // MARK: - Actions from the window
+
+    /// Sends a reply into a conversation and echoes it into the transcript immediately.
+    ///
+    /// `.sent` is set once the frame reaches the socket, which is all the protocol can tell
+    /// us — there is no ack for `notif.reply`, and the phone can still fail to fire the
+    /// intent. Only the phone mirroring the message back earns `.confirmed`.
+    @MainActor
+    func reply(to conversation: ConversationKey, text: String) {
+        let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !body.isEmpty, let target = history.replyTarget(for: conversation) else { return }
+        guard let id = history.appendOutgoing(body, to: conversation) else { return }
+
+        let queued = send(
+            NotifReply(key: target.key, actionId: target.actionId, text: body)
+        ) { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.history.markDelivery(id, .sent) }
+            }
+        }
+        if !queued { history.markDelivery(id, .failed("Phone not connected")) }
+    }
+
+    /// Presses one of the notification's own non-reply buttons — "Mark as read", "Archive".
+    @MainActor
+    func invoke(action: NotifAction, in conversation: ConversationKey) {
+        guard let thread = history.log[conversation], let key = thread.latestKey else { return }
+        send(NotifActionInvoke(key: key, actionId: action.id))
+    }
+
+    @MainActor
+    func dismissOnPhone(_ conversation: ConversationKey) {
+        guard let thread = history.log[conversation], let key = thread.latestKey else { return }
+        send(NotifDismiss(key: key))
+    }
+
+    /// Asks the phone for any PNG this notification references that we do not already have.
+    ///
+    /// Both hashes, not just the icon: the window shows sender photos, and `avatarHash` has
+    /// travelled on the wire since the beginning without anyone ever requesting it.
+    private func requestAssets(for n: NotifPosted) {
+        for hash in [n.iconHash, n.avatarHash].compactMap({ $0 }) where !icons.has(hash) {
+            guard iconRequests.shouldRequest(hash) else { continue }
+            send(IconRequest(hash: hash))
+        }
+    }
+
     @discardableResult
     func send<T: Encodable>(_ message: T, then: (() -> Void)? = nil) -> Bool {
         guard let session = server?.session,

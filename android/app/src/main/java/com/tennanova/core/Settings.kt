@@ -109,6 +109,16 @@ class Settings(context: Context) {
         get() = prefs.getString(KEY_DEVICE_TOKEN, null)
         set(v) = prefs.edit().putString(KEY_DEVICE_TOKEN, v).apply()
 
+    /** Human-readable identity learned only after the Mac authenticates the pairing. */
+    var macName: String?
+        get() = prefs.getString(KEY_MAC_NAME, null)
+        set(v) = prefs.edit().apply {
+            if (v.isNullOrBlank()) remove(KEY_MAC_NAME) else putString(KEY_MAC_NAME, v)
+        }.apply()
+
+    /** A scanned QR is pending until the Mac issues this phone a long-lived token. */
+    val isPairingConfirmed: Boolean get() = !deviceToken.isNullOrBlank()
+
     /** Packages the user has muted. */
     var mutedPackages: Set<String>
         get() = prefs.getStringSet(KEY_MUTED, emptySet()) ?: emptySet()
@@ -124,7 +134,7 @@ class Settings(context: Context) {
             .putString(KEY_SPKI, p.spki)
             .putString(KEY_PAIRING_TOKEN, p.token)
             .apply { if (p.usbPort == null) remove(KEY_USB_PORT) else putInt(KEY_USB_PORT, p.usbPort) }
-            .remove(KEY_DEVICE_TOKEN)
+            .remove(KEY_DEVICE_TOKEN).remove(KEY_MAC_NAME)
             .apply()
     }
 
@@ -132,7 +142,7 @@ class Settings(context: Context) {
         prefs.edit()
             .remove(KEY_HOST).remove(KEY_HOSTS).remove(KEY_PORT).remove(KEY_SPKI)
             .remove(KEY_USB_PORT)
-            .remove(KEY_PAIRING_TOKEN).remove(KEY_DEVICE_TOKEN)
+            .remove(KEY_PAIRING_TOKEN).remove(KEY_DEVICE_TOKEN).remove(KEY_MAC_NAME)
             .apply()
     }
 
@@ -153,6 +163,7 @@ class Settings(context: Context) {
         const val KEY_SPKI = "spki"
         const val KEY_PAIRING_TOKEN = "pairingToken"
         const val KEY_DEVICE_TOKEN = "deviceToken"
+        const val KEY_MAC_NAME = "macName"
         const val KEY_MUTED = "mutedPackages"
     }
 }

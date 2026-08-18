@@ -19,7 +19,13 @@ import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 
-internal data class ConnectionEndpoint(val host: String, val port: Int, val isUsb: Boolean)
+internal data class ConnectionEndpoint(
+    val host: String,
+    val port: Int,
+    val isUsb: Boolean,
+    /** Exact route learned from all-network NSD; null for persisted and USB endpoints. */
+    val network: android.net.Network? = null
+)
 
 /**
  * USB first, then every address the Mac has told us about, best-known first. The list
@@ -29,9 +35,13 @@ internal data class ConnectionEndpoint(val host: String, val port: Int, val isUs
 internal fun buildEndpointCandidates(
     lanHosts: List<String>,
     lanPort: Int,
-    usbPort: Int?
+    usbPort: Int?,
+    discovered: List<ConnectionEndpoint> = emptyList()
 ): List<ConnectionEndpoint> = buildList {
     if (usbPort != null) add(ConnectionEndpoint("127.0.0.1", usbPort, true))
+    // A just-resolved address is both current and tied to the exact Android Network that
+    // heard it, so it precedes addresses remembered from earlier networks.
+    addAll(discovered.filterNot { it.isUsb })
     lanHosts.forEach { add(ConnectionEndpoint(it, lanPort, false)) }
     // Unknown-USB fallback, deliberately *last*.
     //
@@ -41,18 +51,20 @@ internal fun buildEndpointCandidates(
     // cannot be told either: `mac.hosts` needs a session that can never be established.
     // Trying loopback costs one 1s timeout after every real address has already failed,
     // which is the only situation where it matters.
-    if (usbPort == null && lanHosts.isNotEmpty()) {
+    if (usbPort == null && (lanHosts.isNotEmpty() || discovered.isNotEmpty())) {
         add(ConnectionEndpoint("127.0.0.1", lanPort, true))
     }
-}.distinctBy { it.host to it.port }
+}.distinctBy { Triple(it.host, it.port, it.network?.networkHandle) }
 
 /** TLS-pinned, single-flight WebSocket client. */
-class SocketClient(
+internal class SocketClient(
     private val context: Context,
     private val settings: Settings,
     private val onMessage: (JSONObject) -> Unit,
     private val onBinary: (ByteArray) -> Unit,
     private val onStateChange: (State) -> Unit,
+    /** Fresh NSD results, including the exact route on which each Mac was found. */
+    private val discoveredEndpoints: () -> List<ConnectionEndpoint> = { emptyList() },
     /**
      * Every known address failed without a single connection this round. The caller uses
      * this to fall back to probing the subnet — the Mac may be somewhere new entirely.
@@ -113,6 +125,7 @@ class SocketClient(
     fun stop() {
         shouldRun.set(false)
         val old: WebSocket?
+        val oldClient: OkHttpClient?
         synchronized(lifecycleLock) {
             generation++
             reconnect?.let(mainHandler::removeCallbacks)
@@ -120,10 +133,11 @@ class SocketClient(
             disarmWatchdogLocked()
             old = ws
             ws = null
+            oldClient = client
+            client = null
         }
         old?.close(1000, "stopping")
-        client?.dispatcher?.executorService?.shutdown()
-        client = null
+        dispose(oldClient)
         setState(State.DISCONNECTED)
     }
 
@@ -147,6 +161,7 @@ class SocketClient(
      */
     fun failAuthentication() {
         val old: WebSocket?
+        val oldClient: OkHttpClient?
         synchronized(lifecycleLock) {
             fatal = true
             generation++
@@ -155,11 +170,12 @@ class SocketClient(
             disarmWatchdogLocked()
             old = ws
             ws = null
+            oldClient = client
+            client = null
         }
         shouldRun.set(false)
         old?.close(1000, "authentication rejected")
-        client?.dispatcher?.executorService?.shutdown()
-        client = null
+        dispose(oldClient)
         // Deliberately not stop(), which would end on DISCONNECTED and bury the reason.
         setState(State.AUTH_FAILED)
     }
@@ -187,8 +203,12 @@ class SocketClient(
         }
 
         val spki = settings.spki
-        val endpoints =
-            buildEndpointCandidates(settings.hosts, settings.port, settings.usbPort)
+        val endpoints = buildEndpointCandidates(
+            settings.hosts,
+            settings.port,
+            settings.usbPort,
+            discoveredEndpoints()
+        )
         if (endpoints.isEmpty() || spki == null) {
             setState(State.UNPAIRED)
             return
@@ -230,7 +250,7 @@ class SocketClient(
             // phone's Wi-Fi has no internet, so Android keeps cellular as the default and
             // routes every unbound socket there.
             if (!endpoint.isUsb) {
-                NetworkRoutes.networkFor(context, endpoint.host)?.let { network ->
+                (endpoint.network ?: NetworkRoutes.networkFor(context, endpoint.host))?.let { network ->
                     builder.socketFactory(network.socketFactory)
                     builder.dns(object : Dns {
                         override fun lookup(hostname: String): List<InetAddress> =
@@ -250,9 +270,8 @@ class SocketClient(
             /** The tail every abandoned attempt shares, whether okhttp reported it or not. */
             fun abandon(socket: WebSocket?) {
                 socket?.cancel()
+                dispose(http)
                 if (!opened.get() && index + 1 < endpoints.size) {
-                    http.dispatcher.executorService.shutdown()
-                    http.connectionPool.evictAll()
                     connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen)
                     return
                 }
@@ -309,12 +328,12 @@ class SocketClient(
                         Log.i(TAG, "${if (endpoint.isUsb) "USB" else "LAN"} endpoint failed; " +
                             "trying ${if (endpoints[index + 1].isUsb) "USB" else "LAN"}")
                         webSocket.cancel()
-                        http.dispatcher.executorService.shutdown()
-                        http.connectionPool.evictAll()
+                        dispose(http)
                         connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen || mismatch)
                         return
                     }
                     webSocket.cancel()
+                    dispose(http)
                     if (mismatch || pinMismatchSeen) {
                         Log.e(TAG, "TLS pin mismatch on every available endpoint — re-pair required")
                         synchronized(lifecycleLock) { fatal = true }
@@ -332,6 +351,7 @@ class SocketClient(
                 override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
                     if (!claimAttempt(id, index)) return
                     Log.i(TAG, "closed: $code $reason")
+                    dispose(http)
                     setState(State.DISCONNECTED)
                     scheduleReconnect(id)
                 }
@@ -353,6 +373,10 @@ class SocketClient(
             }
         } catch (e: Exception) {
             if (!claimAttempt(id, index)) return
+            val failedClient = synchronized(lifecycleLock) {
+                client.also { client = null }
+            }
+            dispose(failedClient)
             if (index + 1 < endpoints.size) {
                 connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen)
             } else {
@@ -391,6 +415,7 @@ class SocketClient(
     fun retryNow() {
         if (!shouldRun.get() || state == State.CONNECTED) return
         val old: WebSocket?
+        val oldClient: OkHttpClient?
         synchronized(lifecycleLock) {
             if (fatal) return
             backoffMs = 1_000L
@@ -399,8 +424,11 @@ class SocketClient(
             reconnect = null
             old = ws
             ws = null
+            oldClient = client
+            client = null
         }
         old?.cancel()
+        dispose(oldClient)
         connect()
     }
 
@@ -445,6 +473,12 @@ class SocketClient(
         if (state == value) return
         state = value
         onStateChange(value)
+    }
+
+    private fun dispose(http: OkHttpClient?) {
+        http ?: return
+        http.connectionPool.evictAll()
+        http.dispatcher.executorService.shutdown()
     }
 
     private companion object {

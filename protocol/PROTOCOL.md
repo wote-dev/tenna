@@ -19,21 +19,24 @@ Both implementations must be changed together when this file changes.
   address is not enough: on a hotspot the Mac's useful address is on the tether or
   `bridge` interface, and neither side can tell in advance which network is live. Connect
   timeouts are short (3s LAN, 1s USB) precisely because most of the list will be stale.
-- Android binds each attempt to the `Network` whose own subnet contains the target, and
-  leaves it unbound when no network matches. Without that, a Mac sharing its connection
-  over Wi-Fi is unreachable: that Wi-Fi has no internet, Android keeps cellular as the
-  default network, and unbound sockets leave by the wrong interface.
+- Android binds each freshly discovered attempt to the exact `Network` on which mDNS
+  found it. Remembered literal addresses fall back to the `Network` whose own subnet
+  contains the target, and stay unbound when no network matches. Without this, a local-only
+  Wi-Fi is unreachable whenever Android keeps cellular or a VPN as the default route.
 
 ## Discovery
 
-- Mac publishes Bonjour service `_tennanova._tcp` on the local network.
-- Android resolves it with `NsdManager`.
+- Mac publishes Bonjour service `_tennanova._tcp` on every local network. Its TXT record
+  includes `spki`, allowing an already-paired phone to ignore other Tennanova Macs before
+  connecting; TLS pinning remains the actual authentication check.
+- Android uses the `NsdManager` `NetworkRequest` overload to browse every available
+  `Network`, including local-only Wi-Fi, and retains the exact route with each result.
 - The pairing QR embeds literal `host:port` addresses so pairing still works where mDNS is blocked.
 - Discovery can relocate only the disconnected LAN endpoint after DHCP changes. The optional
   USB loopback endpoint remains independent.
-- **mDNS does not work while the phone is tethering.** `NsdManager` runs on the phone's
-  default network, which stays cellular, and the tether interface has no `Network` object
-  at all. When every known address has failed without a single connection, Android probes
+- **The phone's own tether interface has no Android `Network` object**, so even all-network
+  NSD cannot browse it. When every known address has failed without a single connection,
+  Android probes
   its directly-connected subnets (`/23` or narrower, ≤640 addresses, 400 ms each, at most
   once per 30 s) for the port. That is the only way to find a Mac that has just joined the
   hotspot with an address nobody has ever seen. A probe hit proves nothing on its own —

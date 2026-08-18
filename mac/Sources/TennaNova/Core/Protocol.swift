@@ -94,7 +94,7 @@ struct DeviceState: Codable {
 
 // MARK: - Notifications
 
-struct NotifAction: Codable {
+struct NotifAction: Codable, Equatable {
     var id: Int
     var label: String
     var isReply: Bool

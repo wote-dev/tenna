@@ -182,7 +182,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     var onIconNeeded: ((_ hash: String) -> Void)?
 
     private let center = UNUserNotificationCenter.current()
-    private let icons = IconCache()
+    private let icons: IconCache
 
     /// Notifications we have shown and still believe are on screen.
     private var live = Set<String>()
@@ -241,7 +241,10 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
 
     private let lock = NSLock()
 
-    override init() {
+    /// The cache is injected so the presenter and the window read one store. Defaulted
+    /// so the tests, which do not care, keep constructing this with no arguments.
+    init(icons: IconCache = IconCache()) {
+        self.icons = icons
         super.init()
         center.delegate = self
         hydrateDeliveredNotifications()

@@ -13,9 +13,10 @@ final class Server {
     private var listener: NWListener?
     private let identity: TLSIdentity.Loaded
 
-    /// Only one phone is paired at a time in v1, but the listener tolerates a
-    /// replacement connection (e.g. after the phone's network flapped).
+    /// The authenticated connection. New TCP/TLS peers remain candidates until AppState
+    /// validates their hello, so a port probe or a second Mac cannot knock this one off.
     private(set) var session: PeerSession?
+    private var peers: [UUID: PeerSession] = [:]
 
     var onSessionChanged: ((PeerSession?) -> Void)?
     var onMessage: ((PeerSession, Envelope, Data) -> Void)?
@@ -38,9 +39,13 @@ final class Server {
         self.port = desired
 
         // Advertise on the LAN so the phone can find us without a hardcoded IP.
+        let txt = NetService.data(fromTXTRecord: [
+            "spki": Data(identity.spkiHash.utf8)
+        ])
         listener.service = NWListener.Service(
             name: Host.current().localizedName ?? "Tennanova Mac",
-            type: Proto.bonjourType
+            type: Proto.bonjourType,
+            txtRecord: txt
         )
 
         listener.newConnectionHandler = { [weak self] conn in
@@ -63,9 +68,21 @@ final class Server {
     }
 
     func stop() {
-        session?.close()
+        peers.values.forEach { $0.close() }
+        peers.removeAll()
+        session = nil
         listener?.cancel()
         listener = nil
+    }
+
+    /// Makes an authenticated candidate current, then retires the previous connection.
+    /// Called from AppState on the server queue after a valid hello.
+    func activate(_ peer: PeerSession) {
+        guard peers[peer.id] != nil else { return }
+        let previous = session
+        session = peer
+        onSessionChanged?(peer)
+        if previous?.id != peer.id { previous?.close() }
     }
 
     // MARK: - Internals
@@ -85,14 +102,9 @@ final class Server {
     }
 
     private func accept(_ conn: NWConnection) {
-        // A new connection supersedes the old one — the phone reconnecting after a
-        // network change would otherwise leave a zombie session behind.
-        if let existing = session {
-            Log.info("replacing existing session")
-            existing.close()
-        }
-
         let peer = PeerSession(connection: conn, queue: queue)
+        let peerID = peer.id
+        peers[peerID] = peer
         peer.onMessage = { [weak self, weak peer] env, data in
             guard let self, let peer else { return }
             self.onMessage?(peer, env, data)
@@ -101,20 +113,15 @@ final class Server {
             guard let self, let peer else { return }
             self.onBinary?(peer, data)
         }
-        peer.onClosed = { [weak self, weak peer] _ in
+        peer.onClosed = { [weak self] _ in
             guard let self else { return }
-            // Only clear if this is still the current session.
-            if self.session?.id == peer?.id {
+            self.peers.removeValue(forKey: peerID)
+            // A rejected or failed candidate never disturbs the authenticated session.
+            if self.session?.id == peerID {
                 self.session = nil
                 self.onSessionChanged?(nil)
             }
         }
-        peer.onReady = { [weak self, weak peer] in
-            guard let self, let peer else { return }
-            self.onSessionChanged?(peer)
-        }
-
-        session = peer
         peer.start()
     }
 }

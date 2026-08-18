@@ -1,7 +1,7 @@
 # Tennanova landing page
 
-Static "coming soon, private testing" page. Vanilla HTML, CSS and one small script —
-no build step, no dependencies, no third-party requests at runtime.
+Static, light-themed marketing page built around a waitlist signup. Vanilla HTML, CSS and
+one small script — no build step, no dependencies, no third-party requests at runtime.
 
 ## Preview
 
@@ -22,8 +22,8 @@ short one for `index.html`.
 
 ```
 index.html   markup and copy
-styles.css   tokens, layout, glass surfaces — palette mirrors TennaTheme.kt
-script.js    sticky-header state and offscreen fade-in; nothing else depends on it
+styles.css   tokens, layout, cards, form — light palette mirrors TennaTheme.kt
+script.js    waitlist form handling, sticky-header state, offscreen fade-in
 media/       icon and the device still, WebP with JPEG/PNG fallbacks
 fonts/       self-hosted latin woff2 subsets (Bricolage Grotesque, Source Sans 3, IBM Plex Mono)
 ```
@@ -32,6 +32,22 @@ fonts/       self-hosted latin woff2 subsets (Bricolage Grotesque, Source Sans 3
 the baked-in wordmark removed, since the page sets its own type. `media/icon.*` comes from
 `../tennanova_icon.png`.
 
-The page works without JavaScript and without motion: `script.js` only adds a fade for
-content that starts below the fold, and it does nothing at all when the visitor prefers
-reduced motion.
+The page works without JavaScript: the waitlist form still submits (though the browser has
+nowhere to send it without a real `action`, see below), and without motion — `script.js`
+only adds a fade for content that starts below the fold and does nothing when the visitor
+prefers reduced motion.
+
+## Waitlist form
+
+Both waitlist forms (`#waitlist` in the hero, and the one in the bottom CTA) are wired up
+in `script.js` but have no backend yet:
+
+- `WAITLIST_ENDPOINT` at the top of `script.js` is `null`. While it is `null`, submitted
+  emails never leave the browser — the script just validates the address, stores a
+  `tennanova.waitlist.joined` flag in `localStorage`, and swaps the form for a success
+  message, so a refresh keeps showing "you're on the list".
+- To go live, point `WAITLIST_ENDPOINT` at a real API (a Vercel serverless function, a
+  hosted form service, etc.) that accepts a JSON POST of `{ "email": "…" }` and returns a
+  2xx status. The script then only shows success once that request actually succeeds.
+- The page's CSP keeps `form-action 'none'` — submission is handled entirely in JS via
+  `fetch`, not a native form POST, so that directive does not need to change.
