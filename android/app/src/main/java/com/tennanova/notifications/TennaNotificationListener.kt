@@ -30,7 +30,9 @@ import com.tennanova.clipboard.TennaAccessibilityService
 import com.tennanova.core.PairingPayload
 import com.tennanova.core.Settings
 import com.tennanova.net.ConnectionEndpoint
+import com.tennanova.net.ConnectionTransport
 import com.tennanova.net.DiscoveredEndpoint
+import com.tennanova.net.RelayBridge
 import com.tennanova.net.SocketClient
 import com.tennanova.net.MacDiscovery
 import com.tennanova.net.SubnetScanner
@@ -50,6 +52,7 @@ class TennaNotificationListener : NotificationListenerService() {
 
     private lateinit var settings: Settings
     private lateinit var discovery: MacDiscovery
+    private lateinit var relay: RelayBridge
     private var socket: SocketClient? = null
     private var authenticated = false
     private var peerSupportsImages = false
@@ -63,7 +66,7 @@ class TennaNotificationListener : NotificationListenerService() {
     private var exhaustedRounds = 0
 
     /** Reply/action plumbing for notifications currently on screen, keyed by SBN key. */
-    private val actionMap = HashMap<String, List<Notification.Action>>()
+    private val actionMap = RetainedActions<List<Notification.Action>>()
 
     /**
      * Content-addressed PNGs the Mac can ask for by hash — app icons and contact photos
@@ -108,6 +111,9 @@ class TennaNotificationListener : NotificationListenerService() {
             // cancels stale address attempts and takes the newly resolved route at once.
             socket?.retryNow()
         }
+        relay = RelayBridge(this) {
+            settings.relayTarget?.let { (host, room) -> RelayBridge.RelayTarget(host, room) }
+        }
         RuntimeStatusStore.attach(this)
         RuntimeStatusStore.updatePairing(settings.isPairingConfirmed, settings.macName)
         RuntimeStatusStore.updateClipboard(
@@ -132,21 +138,27 @@ class TennaNotificationListener : NotificationListenerService() {
     override fun onListenerConnected() {
         super.onListenerConnected()
         Log.i(TAG, "listener connected to the system")
+        RuntimeStatusStore.updateConnectionService(true)
+        if (settings.isPaired) relay.start()
         startSocket()
         if (settings.isPaired) discovery.start()
     }
 
     override fun onListenerDisconnected() {
         Log.w(TAG, "listener disconnected — requesting rebind")
+        RuntimeStatusStore.updateConnectionService(false)
         setAuthenticated(false)
         socket?.stop()
         socket = null
+        relay.stop()
         // Without this the service can stay dead until reboot.
         requestRebind(android.content.ComponentName(this, TennaNotificationListener::class.java))
     }
 
     override fun onDestroy() {
+        RuntimeStatusStore.updateConnectionService(false)
         socket?.stop()
+        relay.stop()
         discovery.stop()
         val connectivity = getSystemService(ConnectivityManager::class.java)
         if (networkCallbackRegistered) runCatching {
@@ -184,15 +196,20 @@ class TennaNotificationListener : NotificationListenerService() {
                     ConnectionEndpoint(it.host, it.port, isUsb = false, network = it.network)
                 }
             },
+            relayPort = { relay.localPort },
             onStateChange = { state ->
                 when (state) {
                     SocketClient.State.CONNECTED -> {
                         setAuthenticated(false)
+                        RuntimeStatusStore.updateTransport(
+                            socket?.transport ?: ConnectionTransport.NONE
+                        )
                         RuntimeStatusStore.updateConnection(ConnectionStatus.AUTHENTICATING)
                         sendHello()
                     }
                     SocketClient.State.CONNECTING -> {
                         setAuthenticated(false)
+                        RuntimeStatusStore.updateTransport(ConnectionTransport.NONE)
                         // A diagnostic found after several failed rounds must not flash
                         // away for every automatic retry and then reappear seconds later.
                         RuntimeStatusStore.updateConnection(
@@ -253,8 +270,26 @@ class TennaNotificationListener : NotificationListenerService() {
         if (discoveredEndpoints.isNotEmpty() && exhaustedRounds >= ISOLATION_HINT_ROUNDS) {
             RuntimeStatusStore.updateConnection(
                 ConnectionStatus.DISCONNECTED,
-                "Your Mac is on this network but the connection is being blocked — " +
-                    "many routers block device-to-device traffic. Connect the phone by USB."
+                if (settings.relayTarget != null) {
+                    "This network blocks traffic between its own devices, so Tennanova " +
+                        "is connecting over the internet instead."
+                } else {
+                    "Your Mac is on this network but the connection is being blocked — " +
+                        "many routers block device-to-device traffic. Connect the phone " +
+                        "by USB, or use your phone's hotspot."
+                }
+            )
+        } else if (discoveredEndpoints.isEmpty()) {
+            RuntimeStatusStore.updateConnection(
+                ConnectionStatus.DISCONNECTED,
+                if (settings.relayTarget != null) {
+                    "This network is not carrying device-to-device traffic. Tennanova " +
+                        "is reaching your Mac over the internet instead."
+                } else {
+                    "No connection reached the Mac at ${settings.hosts.joinToString(", ")}. " +
+                        "The connection service is running, but the network is not " +
+                        "carrying traffic between your phone and your Mac."
+                }
             )
         }
         SubnetScanner.scan(this, settings.port) { found ->
@@ -273,7 +308,13 @@ class TennaNotificationListener : NotificationListenerService() {
         )
         // A different Mac may push different content; don't suppress its first write.
         ClipboardWriter.reset()
-        if (settings.isPaired) discovery.start() else discovery.stop()
+        if (settings.isPaired) {
+            discovery.start()
+            relay.start()
+        } else {
+            discovery.stop()
+            relay.stop()
+        }
         startSocket()
     }
 
@@ -347,7 +388,9 @@ class TennaNotificationListener : NotificationListenerService() {
                 val key = msg.optString("key")
                 val actionId = msg.optInt("actionId")
                 val text = msg.optString("text")
-                sendReply(key, actionId, text)
+                // Absent from older Mac builds; then the result simply goes unclaimed.
+                val clientId = msg.optString("clientId").ifEmpty { null }
+                sendReply(key, actionId, text, clientId)
             }
 
             "notif.action" -> {
@@ -373,7 +416,11 @@ class TennaNotificationListener : NotificationListenerService() {
                 // Writing the clipboard needs no permission at all — OP_WRITE_CLIPBOARD
                 // is unconditional in AOSP. Only *reading* is restricted.
                 val body = msg.optString("body")
-                if (body.isNotEmpty()) {
+                // Absent origin is tolerated — it is additive within v1 — but a message the
+                // Mac has labelled as ours is our own copy coming home, and applying it would
+                // raise a second system "Copied" panel for one user action.
+                val echoed = msg.optString("origin") == "android"
+                if (body.isNotEmpty() && !echoed) {
                     when (val result = ClipboardWriter.writeText(this, body)) {
                         is ClipboardWriteResult.Written ->
                             RuntimeStatusStore.transfer("Text received from Mac")
@@ -424,7 +471,9 @@ class TennaNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
-        actionMap.remove(sbn.key)
+        // The actions deliberately survive this. See [RetainedActions] — a cancelled
+        // notification does not cancel its reply PendingIntent, and messaging apps
+        // withdraw their notification the moment the chat is read on the phone.
         if (authenticated) socket?.send(Messages.notifRemoved(sbn.key))
     }
 
@@ -450,7 +499,7 @@ class TennaNotificationListener : NotificationListenerService() {
             val isReply = action.remoteInputs?.isNotEmpty() == true
             actions.add(NotifAction(index, action.title?.toString() ?: "Action", isReply))
         }
-        n.actions?.let { actionMap[sbn.key] = it.toList() }
+        n.actions?.let { actionMap.put(sbn.key, it.toList()) }
 
         socket?.send(
             Messages.notifPosted(
@@ -501,13 +550,17 @@ class TennaNotificationListener : NotificationListenerService() {
 
     // MARK: - Replies
 
-    private fun sendReply(key: String, actionId: Int, text: String) {
-        val action = actionMap[key]?.getOrNull(actionId) ?: run {
+    private fun sendReply(key: String, actionId: Int, text: String, clientId: String?) {
+        val action = actionMap.get(key)?.getOrNull(actionId) ?: run {
             Log.w(TAG, "no action $actionId for $key")
+            replyResult(clientId, key, actionId, false,
+                "This phone no longer has a way to reply to that conversation.")
             return
         }
         val remoteInputs = action.remoteInputs ?: run {
             Log.w(TAG, "action $actionId on $key has no RemoteInput")
+            replyResult(clientId, key, actionId, false,
+                "That notification does not accept replies.")
             return
         }
 
@@ -528,13 +581,30 @@ class TennaNotificationListener : NotificationListenerService() {
         try {
             action.actionIntent.send(this, 0, intent)
             Log.i(TAG, "reply sent for $key")
+            replyResult(clientId, key, actionId, true, null)
         } catch (e: PendingIntent.CanceledException) {
+            // The only case where a gone notification really does mean a gone reply: the
+            // app withdrew the intent itself. Worth saying out loud rather than letting
+            // the message sit at "Sent" forever.
             Log.w(TAG, "reply PendingIntent was cancelled: ${e.message}")
+            replyResult(clientId, key, actionId, false,
+                "The app withdrew this conversation's reply.")
         }
     }
 
+    /** Tells the Mac what actually happened, so a reply cannot silently vanish. */
+    private fun replyResult(
+        clientId: String?,
+        key: String,
+        actionId: Int,
+        ok: Boolean,
+        error: String?
+    ) {
+        socket?.send(Messages.notifReplyResult(clientId, key, actionId, ok, error))
+    }
+
     private fun invokeAction(key: String, actionId: Int) {
-        val action = actionMap[key]?.getOrNull(actionId) ?: return
+        val action = actionMap.get(key)?.getOrNull(actionId) ?: return
         try {
             action.actionIntent.send()
         } catch (e: PendingIntent.CanceledException) {
@@ -606,6 +676,7 @@ class TennaNotificationListener : NotificationListenerService() {
         if (!authenticated) return
         when (payload) {
             is ClipboardPayload.Text -> {
+                ClipboardWriter.noteLocalClip(payload.fingerprint)
                 socket?.send(Messages.clipUpdate(payload.value, clipSeq.incrementAndGet()))
                 RuntimeStatusStore.transfer("Text sent to Mac")
             }
@@ -640,6 +711,7 @@ class TennaNotificationListener : NotificationListenerService() {
                             sha256 = image.sha256,
                             name = image.name
                         )
+                        ClipboardWriter.noteLocalClip(payload.fingerprint, image.sha256)
                         if (socket?.sendBinary(Messages.clipImage(header), image.bytes) == true) {
                             RuntimeStatusStore.transfer("Image sent to Mac")
                         } else {
@@ -674,6 +746,18 @@ class TennaNotificationListener : NotificationListenerService() {
         if (reportedUsb != settings.usbPort) {
             settings.usbPort = reportedUsb
             Log.i(TAG, if (reportedUsb != null) "Mac USB tunnel up on $reportedUsb" else "Mac USB tunnel down")
+        }
+
+        // Merged rather than replaced, unlike `hosts`: a Mac whose relay control channel
+        // is momentarily down omits these, and forgetting the relay at that exact moment
+        // would throw away the one route that survives a network like this one.
+        val hadRelay = settings.relayTarget
+        settings.rememberRelay(msg.optString("relayHost").trim(), msg.optString("relayRoom").trim())
+        if (settings.relayTarget != hadRelay) {
+            settings.relayTarget?.let { (host, _) -> Log.i(TAG, "Mac relay available at $host") }
+            // The bridge captures nothing; it reads the target per stream. It only has to
+            // be running, which it is not if the phone paired before the Mac had a relay.
+            if (settings.isPaired) relay.start()
         }
 
         val reported = PairingPayload.hostList(msg.optJSONArray("hosts"))

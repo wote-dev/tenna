@@ -28,9 +28,7 @@ media/       icon and the device still, WebP with JPEG/PNG fallbacks
 fonts/       self-hosted latin woff2 subsets (Bricolage Grotesque, Source Sans 3, IBM Plex Mono)
 ```
 
-`media/devices-*` is cropped from `../assets/social/tennanova-x-banner-v2-source.png` with
-the baked-in wordmark removed, since the page sets its own type. `media/icon.*` comes from
-`../tennanova_icon.png`.
+`media/banner.png` is the main hero image. `media/icon-square.png` and `media/icon-circle.png` are the app icons.
 
 The page works without JavaScript: the waitlist form still submits (though the browser has
 nowhere to send it without a real `action`, see below), and without motion — `script.js`

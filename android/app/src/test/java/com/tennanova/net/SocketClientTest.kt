@@ -142,4 +142,49 @@ class SocketClientTest {
                 .joinToString(".") { (it.toInt() and 0xFF).toString() }
         )
     }
+
+    @Test fun theRelayIsTriedOnlyAfterEveryDirectRouteHasFailed() {
+        // Reaching a Mac on the same desk by way of a server on the other side of the
+        // country is absurd, so the relay never races a direct route — it rescues one.
+        val endpoints = buildEndpointCandidates(
+            lanHosts = listOf("192.168.1.20"),
+            lanPort = 18777,
+            usbPort = 18777,
+            discovered = listOf(ConnectionEndpoint("192.168.1.21", 18777, isUsb = false)),
+            relayPort = 41234
+        )
+
+        assertEquals(
+            ConnectionEndpoint("127.0.0.1", 41234, isUsb = false, isRelay = true),
+            endpoints.last()
+        )
+        assertTrue(endpoints.dropLast(1).none { it.isRelay })
+    }
+
+    @Test fun theRelayIsTheOnlyCandidateWhenNoAddressIsKnown() {
+        // A phone paired over the relay alone, or one whose remembered addresses have all
+        // been cleared, still has somewhere to go.
+        assertEquals(
+            listOf(ConnectionEndpoint("127.0.0.1", 41234, isUsb = false, isRelay = true)),
+            buildEndpointCandidates(emptyList(), 18777, null, emptyList(), relayPort = 41234)
+        )
+    }
+
+    @Test fun noRelayPortMeansNoRelayCandidate() {
+        assertTrue(
+            buildEndpointCandidates(listOf("192.168.1.20"), 18777, null, emptyList(), null)
+                .none { it.isRelay }
+        )
+    }
+
+    @Test fun theRelayLoopbackIsNotConfusedWithTheUsbLoopback() {
+        // Same address, opposite handling: USB is instant and local, the relay is a
+        // round trip through the internet, and neither may be treated as the other.
+        val endpoints = buildEndpointCandidates(emptyList(), 18777, 18777, emptyList(), 41234)
+        val usb = endpoints.single { it.isUsb }
+        val relay = endpoints.single { it.isRelay }
+
+        assertEquals(usb.host, relay.host)
+        assertTrue(!usb.isRelay && !relay.isUsb)
+    }
 }

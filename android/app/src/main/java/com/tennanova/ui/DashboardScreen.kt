@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -44,11 +45,12 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -61,6 +63,7 @@ import androidx.compose.ui.unit.dp
 import com.tennanova.R
 import com.tennanova.clipboard.ClipboardAccessStatus
 import com.tennanova.core.ConnectionStatus
+import com.tennanova.net.ConnectionTransport
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -72,8 +75,11 @@ internal fun DashboardScreen(
     onPair: (String) -> Boolean,
     onUnpair: () -> Unit
 ) {
-    var showManualPair by remember { mutableStateOf(false) }
-    var showUnpair by remember { mutableStateOf(false) }
+    // Saveable, not merely remembered: a rotation or a fold recreates the Activity, and
+    // losing a half-typed pairing code to one is exactly the kind of glitch this screen
+    // cannot afford at the only moment it matters.
+    var showManualPair by rememberSaveable { mutableStateOf(false) }
+    var showUnpair by rememberSaveable { mutableStateOf(false) }
 
     val notificationsReady = state.listenerEnabled
     val clipboardReady = state.clipboard == ClipboardAccessStatus.READY
@@ -209,22 +215,49 @@ private fun ConnectionHero(state: MainUiState) {
 }
 
 /** Internal transport phases intentionally collapse to one calm, user-facing state. */
-internal fun connectionCopy(state: MainUiState): Pair<String, String> = when (state.connection) {
-    ConnectionStatus.CONNECTED ->
-        "Connected" to "Your phone and Mac are in sync."
-    ConnectionStatus.CONNECTING,
-    ConnectionStatus.AUTHENTICATING,
-    ConnectionStatus.DISCONNECTED -> if (state.pairingConfirmed) {
-        "Reconnecting…" to "Searching every shared network for your paired Mac."
-    } else {
-        "Finishing pairing…" to "Searching every shared network for your Mac."
+internal fun connectionCopy(state: MainUiState): Pair<String, String> {
+    if (state.paired && !state.listenerEnabled) {
+        return "Connection paused" to
+            "Enable notification access so Android can run the Mac connection service."
     }
-    ConnectionStatus.PIN_MISMATCH ->
-        "Mac identity changed" to "Re-pair before syncing again."
-    ConnectionStatus.AUTH_FAILED ->
-        "Pairing rejected" to "Scan a fresh code from the Mac."
-    ConnectionStatus.UNPAIRED ->
-        "Pair your Mac" to "Connect once to sync notifications, text and images."
+    if (state.paired && !state.connectionServiceRunning &&
+        state.connection !in setOf(
+            ConnectionStatus.CONNECTED,
+            ConnectionStatus.AUTH_FAILED,
+            ConnectionStatus.PIN_MISMATCH
+        )) {
+        return "Starting connection…" to
+            "Waiting for Android to start the Tennanova connection service."
+    }
+    return when (state.connection) {
+        // A relayed session works, but it leans on a server and it is slower than the
+        // same two devices on one Wi-Fi. Saying "Connected" flat would hide the reason
+        // sync feels different here, and hide that a blocked network is being worked
+        // around rather than fixed.
+        ConnectionStatus.CONNECTED -> when (state.transport) {
+            ConnectionTransport.RELAY ->
+                "Connected over the internet" to
+                    "This network blocks device-to-device traffic, so Tennanova is " +
+                        "relaying through your Mac's relay server."
+            ConnectionTransport.USB ->
+                "Connected by USB" to "Your phone and Mac are in sync over the cable."
+            else ->
+                "Connected" to "Your phone and Mac are in sync."
+        }
+        ConnectionStatus.CONNECTING,
+        ConnectionStatus.AUTHENTICATING,
+        ConnectionStatus.DISCONNECTED -> if (state.pairingConfirmed) {
+            "Reconnecting…" to "Searching every shared network for your paired Mac."
+        } else {
+            "Finishing pairing…" to "Searching every shared network for your Mac."
+        }
+        ConnectionStatus.PIN_MISMATCH ->
+            "Mac identity changed" to "Re-pair before syncing again."
+        ConnectionStatus.AUTH_FAILED ->
+            "Pairing rejected" to "Scan a fresh code from the Mac."
+        ConnectionStatus.UNPAIRED ->
+            "Pair your Mac" to "Connect once to sync notifications, text and images."
+    }
 }
 
 @Composable
@@ -404,14 +437,19 @@ internal fun clipboardCopy(state: MainUiState): Pair<String, String> = when (sta
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun ManualPairSheet(onDismiss: () -> Unit, onPair: (String) -> Unit) {
-    var value by remember { mutableStateOf("") }
+    var value by rememberSaveable { mutableStateOf("") }
     ModalBottomSheet(
         onDismissRequest = onDismiss,
+        // A half-height sheet re-settles when the keyboard resizes it, and one of the
+        // positions it can settle into is `Hidden` — which dismisses the sheet mid-typing.
+        sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true),
         shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
         containerColor = MaterialTheme.colorScheme.surfaceContainer
     ) {
         Column(
-            Modifier.padding(horizontal = 20.dp).padding(bottom = 32.dp),
+            // `enableEdgeToEdge` stops the framework applying IME insets, so without this the
+            // four-line field sits under the keyboard the moment it opens.
+            Modifier.imePadding().padding(horizontal = 20.dp).padding(bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(

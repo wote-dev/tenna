@@ -6,6 +6,15 @@ enum Proto {
     static let bonjourType = "_tennanova._tcp"
     static let defaultPort: UInt16 = 18777
     static let imageClipboardCapability = "clip.image.v1"
+
+    /// The phone keeps a notification's reply action after the notification is gone, and
+    /// answers every `notif.reply` with a `notif.reply.result`.
+    ///
+    /// Without it the Mac must keep refusing to compose into a conversation the phone is
+    /// no longer showing, because such a reply would be dropped in silence. Messaging
+    /// apps withdraw their notification the moment the chat is read on the phone, so that
+    /// refusal is the normal case, not the edge one.
+    static let offlineReplyCapability = "notif.reply.offline.v1"
     static let maxImageBytes = 25 * 1024 * 1024
 
     static func isLowercaseSHA256(_ value: String) -> Bool {
@@ -54,6 +63,15 @@ struct HelloAck: Codable {
     /// See `MacHosts.usbPort`. Repeated here so a reconnecting phone re-learns the USB
     /// endpoint immediately rather than waiting for the next address change.
     var usbPort: Int?
+    /// Where this Mac can be reached when the local network refuses to carry traffic
+    /// between its own clients.
+    ///
+    /// Sent on every connection rather than only in the QR, for the same reason as
+    /// `usbPort`: phones paired before the relay existed, or before it was deployed,
+    /// would otherwise never learn about it without rescanning a code — and the moment
+    /// they need it is the moment they cannot reach the Mac to be told.
+    var relayHost: String?
+    var relayRoom: String?
     var capabilities: [String] = [Proto.imageClipboardCapability]
 }
 
@@ -76,6 +94,15 @@ struct MacHosts: Codable {
     /// Mac's complete account of where it can be reached, so the phone replaces rather
     /// than merges.
     var usbPort: Int?
+    /// Where this Mac can be reached when the local network refuses to carry traffic
+    /// between its own clients.
+    ///
+    /// Sent on every connection rather than only in the QR, for the same reason as
+    /// `usbPort`: phones paired before the relay existed, or before it was deployed,
+    /// would otherwise never learn about it without rescanning a code — and the moment
+    /// they need it is the moment they cannot reach the Mac to be told.
+    var relayHost: String?
+    var relayRoom: String?
 }
 
 struct HelloNack: Codable {
@@ -138,6 +165,24 @@ struct NotifReply: Codable {
     var key: String
     var actionId: Int
     var text: String
+    /// The bubble this belongs to, echoed back in `notif.reply.result`. A phone without
+    /// `notif.reply.offline.v1` ignores the field, exactly as it ignored it before.
+    var clientId: String?
+}
+
+/// What the phone did with a `notif.reply`.
+///
+/// The only thing that ever told the Mac a reply had failed was the socket being down.
+/// A phone can also have no action for that key any more, or an app can have withdrawn
+/// its reply intent — both silent until this existed.
+struct NotifReplyResult: Codable {
+    var v = Proto.version
+    var type = "notif.reply.result"
+    var clientId: String?
+    var key: String
+    var actionId: Int
+    var ok: Bool
+    var error: String?
 }
 
 struct NotifActionInvoke: Codable {

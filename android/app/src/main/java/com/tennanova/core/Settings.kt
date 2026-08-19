@@ -1,6 +1,7 @@
 package com.tennanova.core
 
 import android.content.Context
+import com.tennanova.net.RelayConfig
 import java.util.UUID
 
 /** Persisted pairing state and user preferences. */
@@ -95,6 +96,40 @@ class Settings(context: Context) {
             }.apply()
         }
 
+    /**
+     * The Mac's relay room, learned from the QR or from any later `hello.ack`.
+     *
+     * Kept as a pair or not at all. It survives everything except unpairing, because the
+     * one moment it matters is the moment the phone cannot reach the Mac to be re-taught
+     * it — a relay learned on a working network is what rescues a broken one.
+     */
+    var relayTarget: Pair<String, String>?
+        get() {
+            val host = prefs.getString(KEY_RELAY_HOST, null)?.takeIf { it.isNotBlank() }
+            val room = prefs.getString(KEY_RELAY_ROOM, null)?.takeIf { it.isNotBlank() }
+            return if (host != null && room != null) host to room else null
+        }
+        set(v) = prefs.edit().apply {
+            if (v == null) {
+                remove(KEY_RELAY_HOST); remove(KEY_RELAY_ROOM)
+            } else {
+                putString(KEY_RELAY_HOST, v.first); putString(KEY_RELAY_ROOM, v.second)
+            }
+        }.apply()
+
+    /**
+     * A Mac that is momentarily off the relay does not make the phone forget it.
+     *
+     * `hello.ack` omits the relay while the Mac's own control channel is down, and that
+     * is exactly when the phone should keep the last good target: dropping it would mean
+     * the next network that blocks device-to-device traffic has no route left at all.
+     */
+    fun rememberRelay(host: String?, room: String?) {
+        if (host.isNullOrBlank() || room.isNullOrBlank()) return
+        if (!RelayConfig.isValidHost(host) || !RelayConfig.isValidRoom(room)) return
+        if (relayTarget != host to room) relayTarget = host to room
+    }
+
     /** Base64 SHA-256 of the Mac's public key. The trust anchor for the whole system. */
     var spki: String?
         get() = prefs.getString(KEY_SPKI, null)
@@ -124,7 +159,9 @@ class Settings(context: Context) {
         get() = prefs.getStringSet(KEY_MUTED, emptySet()) ?: emptySet()
         set(v) = prefs.edit().putStringSet(KEY_MUTED, v).apply()
 
-    val isPaired: Boolean get() = spki != null && hosts.isNotEmpty()
+    // A relay target counts: a Mac whose LAN addresses are all stale is still paired,
+    // and the relay is precisely the route that survives that.
+    val isPaired: Boolean get() = spki != null && (hosts.isNotEmpty() || relayTarget != null)
 
     fun savePairing(p: PairingPayload) {
         prefs.edit()
@@ -134,6 +171,13 @@ class Settings(context: Context) {
             .putString(KEY_SPKI, p.spki)
             .putString(KEY_PAIRING_TOKEN, p.token)
             .apply { if (p.usbPort == null) remove(KEY_USB_PORT) else putInt(KEY_USB_PORT, p.usbPort) }
+            .apply {
+                if (p.relayHost == null || p.relayRoom == null) {
+                    remove(KEY_RELAY_HOST); remove(KEY_RELAY_ROOM)
+                } else {
+                    putString(KEY_RELAY_HOST, p.relayHost); putString(KEY_RELAY_ROOM, p.relayRoom)
+                }
+            }
             .remove(KEY_DEVICE_TOKEN).remove(KEY_MAC_NAME)
             .apply()
     }
@@ -143,6 +187,7 @@ class Settings(context: Context) {
             .remove(KEY_HOST).remove(KEY_HOSTS).remove(KEY_PORT).remove(KEY_SPKI)
             .remove(KEY_USB_PORT)
             .remove(KEY_PAIRING_TOKEN).remove(KEY_DEVICE_TOKEN).remove(KEY_MAC_NAME)
+            .remove(KEY_RELAY_HOST).remove(KEY_RELAY_ROOM)
             .apply()
     }
 
@@ -164,6 +209,8 @@ class Settings(context: Context) {
         const val KEY_PAIRING_TOKEN = "pairingToken"
         const val KEY_DEVICE_TOKEN = "deviceToken"
         const val KEY_MAC_NAME = "macName"
+        const val KEY_RELAY_HOST = "relayHost"
+        const val KEY_RELAY_ROOM = "relayRoom"
         const val KEY_MUTED = "mutedPackages"
     }
 }

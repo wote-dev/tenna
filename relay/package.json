@@ -1,0 +1,16 @@
+{
+  "name": "tennanova-relay",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Blind byte relay that lets a Tennanova phone and Mac reach each other from networks that block device-to-device traffic.",
+  "type": "module",
+  "main": "server.js",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}

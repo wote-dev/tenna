@@ -21,9 +21,8 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 
-	<!-- Menu bar only: no Dock icon, no main window. -->
-	<key>LSUIElement</key>
-	<true/>
+	<!-- Deliberately no LSUIElement. The app is a regular Dock application with a main
+	     window; the menu bar item stays as a second, always-there entry point. -->
 
 	<!-- macOS 15+ requires both of these to use Bonjour / the local network. -->
 	<key>NSLocalNetworkUsageDescription</key>

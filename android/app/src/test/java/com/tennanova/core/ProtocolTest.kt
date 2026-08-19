@@ -77,6 +77,47 @@ class ProtocolTest {
         assertNull(PairingPayload.parse(badHost.toString()))
     }
 
+    @Test fun aPairingCodeCarriesTheRelayRoom() {
+        val room = "JNtIvh6Lm1ONInKzeCuo_S4Mx7LaKPT8d3evEOvspII"
+        val raw = JSONObject().put("v", 1).put("host", "192.168.1.4")
+            .put("port", 18777).put("spki", pin).put("token", token)
+            .put("relayHost", "tennanova-relay.fly.dev").put("relayRoom", room)
+            .toString()
+        val payload = PairingPayload.parse(raw)
+        assertEquals("tennanova-relay.fly.dev", payload?.relayHost)
+        assertEquals(room, payload?.relayRoom)
+    }
+
+    @Test fun aPairingCodeFromAMacWithNoRelayStillPairs() {
+        val raw = JSONObject().put("v", 1).put("host", "192.168.1.4")
+            .put("port", 18777).put("spki", pin).put("token", token).toString()
+        val payload = PairingPayload.parse(raw)
+        assertNotNull(payload)
+        assertNull(payload?.relayHost)
+        assertNull(payload?.relayRoom)
+    }
+
+    @Test fun halfARelayTargetIsDroppedRatherThanHalfUsed() {
+        // A host with no room, or a room with no host, is not a route. Keeping either
+        // would buy a doomed round trip on every single reconnect.
+        val raw = JSONObject().put("v", 1).put("host", "192.168.1.4")
+            .put("port", 18777).put("spki", pin).put("token", token)
+            .put("relayHost", "tennanova-relay.fly.dev").toString()
+        val payload = PairingPayload.parse(raw)
+        assertNotNull(payload)
+        assertNull(payload?.relayHost)
+    }
+
+    @Test fun aRelayTargetIsRejectedWhenTheHostLooksLikeAnInjection() {
+        val room = "JNtIvh6Lm1ONInKzeCuo_S4Mx7LaKPT8d3evEOvspII"
+        val raw = JSONObject().put("v", 1).put("host", "192.168.1.4")
+            .put("port", 18777).put("spki", pin).put("token", token)
+            .put("relayHost", "evil.example/../x").put("relayRoom", room).toString()
+        val payload = PairingPayload.parse(raw)
+        assertNotNull(payload)
+        assertNull("a scanned QR is untrusted input like any other", payload?.relayHost)
+    }
+
     @Test fun helloAdvertisesImageClipboard() {
         val hello = Messages.hello("id", "Phone", "Model", 36, 90, token, null)
         val capabilities = hello.getJSONArray("capabilities")

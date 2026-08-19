@@ -24,7 +24,15 @@ internal data class ConnectionEndpoint(
     val port: Int,
     val isUsb: Boolean,
     /** Exact route learned from all-network NSD; null for persisted and USB endpoints. */
-    val network: android.net.Network? = null
+    val network: android.net.Network? = null,
+    /**
+     * Loopback port served by [RelayBridge], which tunnels to the Mac over the internet.
+     *
+     * Marked rather than inferred from the address because it is loopback like USB but
+     * behaves like nothing else: the far end is several hundred milliseconds away, and
+     * the address is an implementation detail that must never be remembered as a host.
+     */
+    val isRelay: Boolean = false
 )
 
 /**
@@ -36,7 +44,8 @@ internal fun buildEndpointCandidates(
     lanHosts: List<String>,
     lanPort: Int,
     usbPort: Int?,
-    discovered: List<ConnectionEndpoint> = emptyList()
+    discovered: List<ConnectionEndpoint> = emptyList(),
+    relayPort: Int? = null
 ): List<ConnectionEndpoint> = buildList {
     if (usbPort != null) add(ConnectionEndpoint("127.0.0.1", usbPort, true))
     // A just-resolved address is both current and tied to the exact Android Network that
@@ -54,6 +63,12 @@ internal fun buildEndpointCandidates(
     if (usbPort == null && (lanHosts.isNotEmpty() || discovered.isNotEmpty())) {
         add(ConnectionEndpoint("127.0.0.1", lanPort, true))
     }
+    // Last, always. The relay works from anywhere with internet, which is exactly why it
+    // must never win a race against a direct route: going through a server on the other
+    // side of the country to reach a Mac on the same desk would be absurd.
+    if (relayPort != null) {
+        add(ConnectionEndpoint("127.0.0.1", relayPort, isUsb = false, isRelay = true))
+    }
 }.distinctBy { Triple(it.host, it.port, it.network?.networkHandle) }
 
 /** TLS-pinned, single-flight WebSocket client. */
@@ -65,6 +80,8 @@ internal class SocketClient(
     private val onStateChange: (State) -> Unit,
     /** Fresh NSD results, including the exact route on which each Mac was found. */
     private val discoveredEndpoints: () -> List<ConnectionEndpoint> = { emptyList() },
+    /** Loopback port of a live [RelayBridge], or null when there is no relay route. */
+    private val relayPort: () -> Int? = { null },
     /**
      * Every known address failed without a single connection this round. The caller uses
      * this to fall back to probing the subnet — the Mac may be somewhere new entirely.
@@ -72,6 +89,15 @@ internal class SocketClient(
     private val onEndpointsExhausted: () -> Unit = {}
 ) {
     enum class State { DISCONNECTED, CONNECTING, CONNECTED, PIN_MISMATCH, AUTH_FAILED, UNPAIRED }
+
+    /**
+     * How the live session is being carried. Read by the UI when [State.CONNECTED]
+     * arrives, because "connected" means something different to a user depending on
+     * whether it took a cable, the local network, or a server on the internet.
+     */
+    @Volatile
+    var transport: ConnectionTransport = ConnectionTransport.NONE
+        private set
 
     private val shouldRun = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -207,7 +233,8 @@ internal class SocketClient(
             settings.hosts,
             settings.port,
             settings.usbPort,
-            discoveredEndpoints()
+            discoveredEndpoints(),
+            relayPort()
         )
         if (endpoints.isEmpty() || spki == null) {
             setState(State.UNPAIRED)
@@ -240,16 +267,15 @@ internal class SocketClient(
                 .pingInterval(20, TimeUnit.SECONDS)
                 // Short on purpose: this list can be six addresses long and only one of
                 // them is real. A 10s timeout each meant a minute before backoff started.
-                .connectTimeout(
-                    if (endpoint.isUsb) USB_CONNECT_TIMEOUT_MS else LAN_CONNECT_TIMEOUT_MS,
-                    TimeUnit.MILLISECONDS
-                )
+                .connectTimeout(connectTimeoutFor(endpoint), TimeUnit.MILLISECONDS)
                 .readTimeout(0, TimeUnit.MILLISECONDS)
 
             // Without this, a Mac on its own Internet Sharing network is unreachable: the
             // phone's Wi-Fi has no internet, so Android keeps cellular as the default and
             // routes every unbound socket there.
-            if (!endpoint.isUsb) {
+            // Loopback in both cases, so binding to a network would send it out a real
+            // interface and lose the tunnel entirely.
+            if (!endpoint.isUsb && !endpoint.isRelay) {
                 (endpoint.network ?: NetworkRoutes.networkFor(context, endpoint.host))?.let { network ->
                     builder.socketFactory(network.socketFactory)
                     builder.dns(object : Dns {
@@ -285,11 +311,17 @@ internal class SocketClient(
                 override fun onOpen(webSocket: WebSocket, response: Response) {
                     if (!isCurrent(id, index)) return
                     opened.set(true)
-                    Log.i(TAG, "connected over ${if (endpoint.isUsb) "USB" else "LAN"} " +
+                    transport = when {
+                        endpoint.isRelay -> ConnectionTransport.RELAY
+                        endpoint.isUsb -> ConnectionTransport.USB
+                        else -> ConnectionTransport.LAN
+                    }
+                    Log.i(TAG, "connected over ${describe(endpoint)} " +
                         "to ${endpoint.host}:${endpoint.port}")
                     // The address that just worked leads the list next time, so a phone
-                    // that stays on one hotspot stops paying for the stale entries.
-                    if (!endpoint.isUsb) settings.promoteHost(endpoint.host)
+                    // that stays on one hotspot stops paying for the stale entries. The
+                    // relay's loopback address is not a host and must never enter that list.
+                    if (!endpoint.isUsb && !endpoint.isRelay) settings.promoteHost(endpoint.host)
                     setState(State.CONNECTED)
                     // A Mac that accepts the socket and then never acks `hello` leaves us
                     // in AUTHENTICATING with nothing to time it out. Cleared by
@@ -325,8 +357,8 @@ internal class SocketClient(
                     // if it lost the race, and no second callback can act on it either.
                     if (!claimAttempt(id, index)) return
                     if (!opened.get() && index + 1 < endpoints.size) {
-                        Log.i(TAG, "${if (endpoint.isUsb) "USB" else "LAN"} endpoint failed; " +
-                            "trying ${if (endpoints[index + 1].isUsb) "USB" else "LAN"}")
+                        Log.i(TAG, "${describe(endpoint)} endpoint failed; " +
+                            "trying ${describe(endpoints[index + 1])}")
                         webSocket.cancel()
                         dispose(http)
                         connectEndpoint(id, endpoints, index + 1, spki, pinMismatchSeen || mismatch)
@@ -363,9 +395,7 @@ internal class SocketClient(
             // Only if okhttp has not already opened the socket — it can call back before
             // `newWebSocket` returns, and onOpen has armed the authentication timer by then.
             if (!opened.get()) {
-                val connectBudget =
-                    (if (endpoint.isUsb) USB_CONNECT_TIMEOUT_MS else LAN_CONNECT_TIMEOUT_MS) +
-                        HANDSHAKE_GRACE_MS
+                val connectBudget = connectTimeoutFor(endpoint) + HANDSHAKE_GRACE_MS
                 armWatchdog(id, index, connectBudget) {
                     Log.w(TAG, "${endpoint.host}:${endpoint.port} stalled before opening; moving on")
                     abandon(socket)
@@ -432,6 +462,25 @@ internal class SocketClient(
         connect()
     }
 
+    /**
+     * The relay gets far more room than a LAN address.
+     *
+     * It is loopback, but the bridge behind it has to reach a server on the internet and
+     * wait for the Mac to be told to pick the stream up — a second is normal, and the
+     * only alternative to waiting is falling back to nothing at all.
+     */
+    private fun connectTimeoutFor(endpoint: ConnectionEndpoint): Long = when {
+        endpoint.isRelay -> RELAY_CONNECT_TIMEOUT_MS
+        endpoint.isUsb -> USB_CONNECT_TIMEOUT_MS
+        else -> LAN_CONNECT_TIMEOUT_MS
+    }
+
+    private fun describe(endpoint: ConnectionEndpoint): String = when {
+        endpoint.isRelay -> "relay"
+        endpoint.isUsb -> "USB"
+        else -> "LAN"
+    }
+
     private fun isCurrent(id: Long, index: Int): Boolean =
         synchronized(lifecycleLock) { generation == id && attempt == index && shouldRun.get() }
 
@@ -470,6 +519,7 @@ internal class SocketClient(
     }
 
     private fun setState(value: State) {
+        if (value != State.CONNECTED) transport = ConnectionTransport.NONE
         if (state == value) return
         state = value
         onStateChange(value)
@@ -485,6 +535,7 @@ internal class SocketClient(
         const val TAG = "TennaNova"
         const val LAN_CONNECT_TIMEOUT_MS = 3_000L
         const val USB_CONNECT_TIMEOUT_MS = 1_000L
+        const val RELAY_CONNECT_TIMEOUT_MS = 20_000L
         /** Headroom over the TCP connect for the TLS handshake and the HTTP-101 upgrade. */
         const val HANDSHAKE_GRACE_MS = 5_000L
         /** From an open socket to `hello.ack`. Generous: the Mac replays notifications first. */

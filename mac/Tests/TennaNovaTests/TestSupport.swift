@@ -45,3 +45,15 @@ func makeNotification(
         actions: actions
     )
 }
+
+/// Hands a test its own archive in a throwaway directory and cleans up after it.
+///
+/// The directory plumbing lives here rather than in the test file for the same reason
+/// everything else in this file does: naming a Foundation type in a file that imports
+/// `Testing` pulls in a cross-import overlay the Command Line Tools ship broken.
+func withTemporaryArchive(_ body: (ConversationArchive) -> Void) {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tenna-archive-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    body(ConversationArchive(directory: dir))
+}

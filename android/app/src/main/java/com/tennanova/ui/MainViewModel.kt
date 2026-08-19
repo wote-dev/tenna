@@ -16,10 +16,13 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.delay
+import com.tennanova.net.ConnectionTransport
 import kotlinx.coroutines.launch
 
 data class MainUiState(
     val paired: Boolean = false,
+    val transport: ConnectionTransport = ConnectionTransport.NONE,
+    val connectionServiceRunning: Boolean = false,
     val pairingConfirmed: Boolean = false,
     val macName: String? = null,
     val host: String? = null,
@@ -81,6 +84,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     ) { pair, listener, accessibility, runtime, localMessage ->
         MainUiState(
             paired = pair.paired,
+            transport = runtime.transport,
+            connectionServiceRunning = runtime.connectionServiceRunning,
             pairingConfirmed = pair.confirmed || runtime.pairingConfirmed,
             macName = runtime.macName ?: pair.macName,
             host = pair.host,

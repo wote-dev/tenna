@@ -12,6 +12,15 @@ class ClipboardFingerprintTest {
         )
     }
 
+    /**
+     * `ClipboardWriter` builds its echo guard from the same string. If these two ever drift,
+     * a clip the phone sent would come back from the Mac looking new and raise a second
+     * system "Copied" panel — silently, and only on a reconnect.
+     */
+    @Test fun textFingerprintMatchesTheClipboardWriterFormat() {
+        assertEquals("text:tenna", ClipboardPayload.Text("tenna").fingerprint)
+    }
+
     @Test fun textChangesProduceDifferentFingerprints() {
         assertNotEquals(
             ClipboardPayload.Text("https://example.com/one").fingerprint,

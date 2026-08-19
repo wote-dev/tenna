@@ -49,6 +49,20 @@ object ClipboardWriter {
     private var lastWrittenImageSha256: String? = null
 
     /**
+     * Records what the *phone* just put on its own clipboard and sent to the Mac.
+     *
+     * Without this the guard only knows about content it wrote itself, so the Mac re-pushing
+     * a clip that started on the phone — which it does on every reconnect — lands as a fresh
+     * write, and Android raises its "Copied" panel a second time for something the user
+     * copied once. The image hash travels separately because outbound images are identified
+     * by a `content://` URI and inbound ones by their SHA-256; neither ever matches the other.
+     */
+    fun noteLocalClip(fingerprint: String, imageSha256: String? = null) {
+        lastWrittenFingerprint = fingerprint
+        lastWrittenImageSha256 = imageSha256
+    }
+
+    /**
      * Forgets the echo-suppression state. Called when the peer changes, so a freshly
      * paired Mac can always push its clipboard through once.
      */

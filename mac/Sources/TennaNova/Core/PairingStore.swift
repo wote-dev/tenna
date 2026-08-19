@@ -7,6 +7,7 @@ final class PairingStore {
 
     private let key = "pairedDevice"
     private let tokenKey = "pairingToken"
+    private let relaySecretKey = "relaySecret"
     private let defaults = UserDefaults.standard
 
     /// The one-time token shown in the QR.
@@ -25,6 +26,19 @@ final class PairingStore {
     func rotatePairingToken() -> String {
         let fresh = TLSIdentity.randomToken()
         defaults.set(fresh, forKey: tokenKey)
+        return fresh
+    }
+
+    /// This Mac's claim on its relay room, generated once and never rotated.
+    ///
+    /// Deliberately outlives pairing and unpairing: it names *this Mac*, not a phone, and
+    /// a phone that pairs later still has to get past the pinned certificate and the
+    /// pairing token before the room is worth anything to it. Rotating it here would
+    /// strand every already-paired phone on networks where the relay is the only route.
+    var relaySecret: String {
+        if let existing = defaults.string(forKey: relaySecretKey) { return existing }
+        let fresh = TLSIdentity.randomToken()
+        defaults.set(fresh, forKey: relaySecretKey)
         return fresh
     }
 

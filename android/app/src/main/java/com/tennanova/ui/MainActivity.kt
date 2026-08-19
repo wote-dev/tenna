@@ -33,10 +33,18 @@ class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
     private var onboardingStep: OnboardingStep? = null
 
+    /**
+     * A share is consumed once, not once per Activity instance. `onCreate` runs again on every
+     * rotation or fold with the same `ACTION_SEND` intent still attached, and sending the item
+     * twice makes the Mac — and then the phone's own clipboard panel — repeat itself.
+     */
+    private var shareConsumed = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         onboardingStep = savedInstanceState?.getString(KEY_ONBOARDING_STEP)
             ?.let { runCatching { OnboardingStep.valueOf(it) }.getOrNull() }
+        shareConsumed = savedInstanceState?.getBoolean(KEY_SHARE_CONSUMED) == true
         enableEdgeToEdge()
         consumePairingExtra(intent)
         consumeSharedContent(intent)
@@ -66,18 +74,28 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         viewModel.refreshAccessState()
+        // Updating or force-stopping the APK can leave an enabled notification listener
+        // unbound. Pairing cannot progress until Android recreates it, so request that on
+        // every foreground resume rather than only during first-run onboarding.
+        if (viewModel.hasNotificationAccess() &&
+            !RuntimeStatusStore.state.value.connectionServiceRunning) {
+            requestNotificationRebind()
+        }
         if (onboardingStep != null) advanceOnboarding()
     }
 
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        // A genuinely new intent carries a genuinely new share.
+        shareConsumed = false
         consumePairingExtra(intent)
         consumeSharedContent(intent)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         onboardingStep?.let { outState.putString(KEY_ONBOARDING_STEP, it.name) }
+        outState.putBoolean(KEY_SHARE_CONSUMED, shareConsumed)
         super.onSaveInstanceState(outState)
     }
 
@@ -88,7 +106,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun consumeSharedContent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND) return
+        if (intent?.action != Intent.ACTION_SEND || shareConsumed) return
+        shareConsumed = true
         val payload = when {
             intent.type?.startsWith("image/") == true -> {
                 @Suppress("DEPRECATION")
@@ -194,5 +213,6 @@ class MainActivity : ComponentActivity() {
 
     private companion object {
         const val KEY_ONBOARDING_STEP = "onboardingStep"
+        const val KEY_SHARE_CONSUMED = "shareConsumed"
     }
 }

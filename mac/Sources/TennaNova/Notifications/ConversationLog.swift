@@ -99,6 +99,20 @@ struct ConversationThread: Identifiable, Codable, Equatable {
     var latestActions: [NotifAction] = []
 
     var latest: MirroredMessage? { messages.last }
+
+    /// The one line the sidebar shows under the thread name.
+    ///
+    /// A group chat prefixes the speaker, because "are you close?" with no name attached
+    /// is meaningless there. A one-to-one does not: the row title already names the only
+    /// other person in it, so the prefix would be pure repetition.
+    var preview: String {
+        guard let latest else { return "" }
+        if latest.origin == .mac { return "You: \(latest.body)" }
+        guard let sender = latest.senderName, !sender.isEmpty, sender != title else {
+            return latest.body
+        }
+        return "\(sender): \(latest.body)"
+    }
 }
 
 struct ReplyTarget: Equatable {
@@ -285,15 +299,54 @@ struct ConversationLog: Codable, Equatable {
     /// Resolves from the *latest* post's action list, because `actionId` is a positional
     /// index into whichever notification carried it — an id captured from an older message
     /// can silently invoke a different button.
-    func replyTarget(for key: ConversationKey) -> ReplyTarget? {
-        guard let thread = threads[key], thread.isLiveOnPhone,
+    ///
+    /// `allowingWithdrawn` is what makes replying to a real conversation possible at all.
+    /// A phone advertising `notif.reply.offline.v1` keeps the reply action after the
+    /// notification is cleared, and an Android reply `PendingIntent` outlives the
+    /// notification that carried it — so "the phone is no longer showing this" is not the
+    /// same as "you cannot reply to this". Against an older phone it still is, and the
+    /// caller passes false.
+    func replyTarget(for key: ConversationKey,
+                     allowingWithdrawn: Bool = false) -> ReplyTarget? {
+        guard let thread = threads[key],
+              thread.isLiveOnPhone || allowingWithdrawn,
               let notificationKey = thread.latestKey,
               let action = thread.latestActions.first(where: { $0.isReply })
         else { return nil }
         return ReplyTarget(key: notificationKey, actionId: action.id)
     }
 
+    /// The phone's verdict on a reply we sent.
+    ///
+    /// Only failure is acted on. Success means the phone fired the intent, which is not
+    /// yet proof the app accepted it — `.confirmed` stays reserved for the phone mirroring
+    /// the message back, and a reply into a withdrawn conversation may never earn it.
+    mutating func applyReplyResult(_ id: UUID, ok: Bool, error: String?) {
+        guard !ok else { return }
+        markDelivery(id, .failed(error ?? "The phone could not send this reply."))
+    }
+
     mutating func clear() { threads.removeAll() }
+
+    // MARK: - Restoring
+
+    /// Corrects the two claims a saved transcript can no longer make.
+    ///
+    /// A reply left `.sending` was in flight when the app quit; nothing will ever
+    /// reconcile it, so leaving it spinning would be a lie that never resolves. And
+    /// `isLiveOnPhone` promises that `latestKey` still addresses a notification the phone
+    /// is holding — replying through a key from a previous session either does nothing or
+    /// fires the wrong positional action. The phone re-asserts both by resyncing whatever
+    /// is still on its screen the moment it reconnects.
+    mutating func normalizeAfterRestore() {
+        for (key, var thread) in threads {
+            thread.isLiveOnPhone = false
+            for index in thread.messages.indices where thread.messages[index].delivery == .sending {
+                thread.messages[index].delivery = .failed("Not sent — Tennanova quit")
+            }
+            threads[key] = thread
+        }
+    }
 
     // MARK: - Retention
 

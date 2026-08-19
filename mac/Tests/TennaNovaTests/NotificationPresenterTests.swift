@@ -344,3 +344,67 @@ private func sampleNotification(
         actions: actions
     )
 }
+
+/// The rule that keeps the Mac from clearing the phone's notifications behind the user's
+/// back: what Notification Center never held, the user cannot have dismissed.
+struct DismissalWatchTests {
+
+    @Test func aCardNeverSeenOnScreenIsNeverReportedAsDismissed() {
+        var watch = DismissalWatch()
+        watch.posted("k1")
+
+        // Some Macs retain nothing at all, so every poll comes back empty. Reading that as
+        // a swipe told the phone to cancel the notification — and with it the reply intent
+        // the window's composer depends on — about two seconds after it arrived.
+        let first = watch.reconcile(onScreen: [])
+        let second = watch.reconcile(onScreen: [])
+
+        #expect(first.isEmpty)
+        #expect(second.isEmpty)
+    }
+
+    @Test func aCardSeenAndThenGoneIsReportedOnce() {
+        var watch = DismissalWatch()
+        watch.posted("k1")
+
+        let whileOnScreen = watch.reconcile(onScreen: ["k1"])
+        let afterItWentAway = watch.reconcile(onScreen: [])
+        let again = watch.reconcile(onScreen: [])
+
+        #expect(whileOnScreen.isEmpty)
+        #expect(afterItWentAway == ["k1"])
+        #expect(again.isEmpty)
+    }
+
+    @Test func hydratedCardsAreDismissibleImmediately() {
+        var watch = DismissalWatch()
+        // Already in Notification Center when the app launched: observed by definition,
+        // and swiping one away must still reach the phone.
+        watch.observed("k1")
+
+        #expect(watch.reconcile(onScreen: []) == ["k1"])
+    }
+
+    @Test func aWithdrawnCardIsNotReportedBack() {
+        var watch = DismissalWatch()
+        watch.posted("k1")
+        _ = watch.reconcile(onScreen: ["k1"])
+
+        // The phone took it away, or the user pressed Close and macOS told us directly.
+        watch.forget("k1")
+
+        #expect(watch.reconcile(onScreen: []).isEmpty)
+    }
+
+    @Test func awaitingCardsAreBounded() {
+        var watch = DismissalWatch()
+        for i in 0...(DismissalWatch.awaitingLimit + 50) { watch.posted("k\(i)") }
+
+        #expect(watch.awaiting.count == DismissalWatch.awaitingLimit)
+        // Oldest go first, and an evicted key stays undismissible rather than becoming
+        // dismissible by accident.
+        #expect(!watch.awaiting.contains("k0"))
+        #expect(watch.reconcile(onScreen: []).isEmpty)
+    }
+}
+

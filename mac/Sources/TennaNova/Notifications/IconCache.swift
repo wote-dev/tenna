@@ -3,7 +3,11 @@ import AppKit
 
 /// Content-addressed store of the PNGs the phone sends — app icons and contact photos
 /// alike. Each one crosses the wire once, ever.
-final class IconCache {
+///
+/// `Sendable` by inspection rather than by construction: every stored property is a
+/// `let`, and the only shared mutable thing it touches is the filesystem, which it writes
+/// atomically. It has always been used from several queues at once.
+final class IconCache: @unchecked Sendable {
 
     private let dir: URL
 

@@ -2,6 +2,7 @@ package com.tennanova.core
 
 import com.tennanova.clipboard.ClipboardAccessStatus
 import com.tennanova.clipboard.ClipboardPayload
+import com.tennanova.net.ConnectionTransport
 import com.tennanova.notifications.TennaNotificationListener
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -31,6 +32,8 @@ enum class ConnectionStatus {
 
 data class RuntimeSnapshot(
     val connection: ConnectionStatus = ConnectionStatus.UNPAIRED,
+    val transport: ConnectionTransport = ConnectionTransport.NONE,
+    val connectionServiceRunning: Boolean = false,
     val pairingConfirmed: Boolean = false,
     val macName: String? = null,
     val clipboard: ClipboardAccessStatus = ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
@@ -54,7 +57,18 @@ object RuntimeStatusStore {
     }
 
     fun detach(service: TennaNotificationListener) {
-        if (serviceRef.get() === service) serviceRef.clear()
+        if (serviceRef.get() === service) {
+            serviceRef.clear()
+            updateConnectionService(false)
+        }
+    }
+
+    fun updateTransport(transport: ConnectionTransport) {
+        mutable.update { it.copy(transport = transport) }
+    }
+
+    fun updateConnectionService(running: Boolean) {
+        mutable.update { it.copy(connectionServiceRunning = running) }
     }
 
     fun updateConnection(status: ConnectionStatus, error: String? = null) {

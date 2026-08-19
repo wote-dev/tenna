@@ -23,6 +23,22 @@ Both implementations must be changed together when this file changes.
   found it. Remembered literal addresses fall back to the `Network` whose own subnet
   contains the target, and stay unbound when no network matches. Without this, a local-only
   Wi-Fi is unreachable whenever Android keeps cellular or a VPN as the default route.
+- When every direct route fails, the session falls back to the **relay** (`relay/`). Public
+  and corporate Wi-Fi routinely run AP client isolation, which drops every packet between
+  two clients of the same network; no LAN transport can survive that, because the block is
+  enforced in the access point. Both devices instead dial out to a relay over `wss` on 443
+  and it forwards bytes between them.
+
+  The relay is a byte pipe and nothing more. It carries **this same TLS 1.2+ WebSocket
+  session**, negotiated end to end through the pipe and still pinned to the Mac's public
+  key, so the relay sees only ciphertext and cannot read, forge or authenticate a session.
+  Neither side's protocol code knows the relay exists: each runs a local loopback pump, and
+  the Mac's pumped stream terminates on its own ordinary listener.
+
+  It is always tried **last**, after USB and every LAN address, so a Mac on the same desk
+  is never reached by way of a server on another continent. Connect timeout is 20s, against
+  3s for LAN and 1s for USB, because the phone must wait for the relay to hand the stream
+  to the Mac.
 
 ## Discovery
 
@@ -50,8 +66,15 @@ Both implementations must be changed together when this file changes.
    > not an error return) on EC keys on macOS 27. Verified. Use RSA.
 2. The Mac displays a QR containing:
    ```json
-   {"v":1,"host":"192.168.1.42","hosts":["192.168.1.42","192.168.43.37"],"port":18777,"usbPort":18777,"spki":"<base64 SHA-256 of server public key>","token":"<32-byte base64 one-time pairing token>"}
+   {"v":1,"host":"192.168.1.42","hosts":["192.168.1.42","192.168.43.37"],"port":18777,"usbPort":18777,"spki":"<base64 SHA-256 of server public key>","token":"<32-byte base64 one-time pairing token>","relayHost":"tennanova-relay.fly.dev","relayRoom":"<base64url sha256 of the Mac's relay secret>"}
    ```
+   `relayHost` and `relayRoom` are optional and additive within protocol v1. They name the
+   Mac's relay and the room to ask for; `relayRoom` is `base64url(sha256(relaySecret))`, so
+   the phone can join the room but never host it. Both appear only while the Mac's own
+   relay control channel is up. A room id is not a credential: knowing one buys a TCP pipe
+   to the Mac's listener, exactly the exposure of sharing its LAN, and the pinned
+   certificate and pairing token still guard the session.
+
    `usbPort` and `hosts` are optional and additive within protocol v1. `usbPort` advertises
    the Android loopback port only; `host` and `port` always remain a LAN endpoint. `hosts`
    lists every address the Mac answers on, best first, and always repeats `host` as its
@@ -87,13 +110,14 @@ rather than guessing.
 // Mac -> Android
 {"v":1,"type":"hello.ack","ok":true,"deviceToken":"<issued on first pair>",
  "macName":"Daniel's MacBook","hosts":["192.168.1.42","192.168.43.37"],"port":18777,
- "usbPort":18777,"capabilities":["clip.image.v1"]}
+ "usbPort":18777,"relayHost":"tennanova-relay.fly.dev","relayRoom":"<base64url sha256 of the Mac's relay secret>",
+ "capabilities":["clip.image.v1"]}
 
 // Mac -> Android, the address list changed mid-session (it joined a hotspot, say),
 // or the USB tunnel came up or went away.
 // Optional and ignorable: a phone that skips it simply keeps the hello.ack list.
 {"v":1,"type":"mac.hosts","hosts":["192.168.1.42","192.168.43.37"],"port":18777,
- "usbPort":18777}
+ "usbPort":18777,"relayHost":"tennanova-relay.fly.dev","relayRoom":"<base64url sha256 of the Mac's relay secret>"}
 
 // Mac -> Android, refusal (bad token, version mismatch)
 {"v":1,"type":"hello.nack","reason":"bad_token|version_mismatch"}
@@ -113,6 +137,11 @@ That still leaves the case where the phone cannot establish any session to be to
 phone has no known `usbPort`, it appends `127.0.0.1:port` to its candidate list as the **last**
 entry, after every real address has failed. That costs one 1s timeout only in the situation
 where nothing else works.
+
+`relayHost` and `relayRoom` travel on the wire for the same reason as `usbPort`, but are
+**merged, not replaced**: they are absent whenever the Mac's relay control channel is
+momentarily down, and forgetting the relay at that exact moment would strip a phone of the
+one route that survives a network which carries nothing between its own clients.
 
 `hosts` is the Mac's complete account of where it can be reached, so the phone **replaces**
 its list with it rather than merging — that is what stops dead addresses accumulating as
@@ -214,11 +243,28 @@ immediately followed by one binary frame of exactly `bytes` bytes:
 
 - `origin` + `seq` identify clipboard events. Receivers combine those fields with content hashes,
   pasteboard change counts, or URI fingerprints to suppress echoes.
+- **Neither side sends a peer content that peer is already known to hold**, and content it *sent
+  us* counts exactly as much as content we sent it. Every `setPrimaryClip` makes Android raise its
+  own "Copied" panel, so a clip that started on the phone and came back on the next `hello` push
+  showed the user a second panel for one copy. Both ends therefore track one fingerprint of "what
+  the peer has", updated on send *and* on receive, and the Mac notes the bytes that actually
+  landed on its pasteboard rather than the ones that arrived — a phone JPEG is re-encoded to PNG
+  on the way in, and the re-encoded bytes are what a later push would carry.
+- A `clip.update` carrying `"origin":"android"` is our own copy coming home; Android drops it
+  rather than applying it. An absent `origin` is still tolerated.
 - Text remains compatible with peers that do not advertise image capability.
 - **Mac → Android needs no Android permission** — `OP_WRITE_CLIPBOARD` is unconditional in AOSP.
 - **Android → Mac requires Tennanova's one-time Accessibility grant.** The service detects an
   explicit copy signal, briefly owns a non-touchable Accessibility overlay to satisfy Android's
   focused-UID clipboard rule, reads one clip through public APIs, and removes the overlay.
+  That overlay takes window focus but sets `FLAG_ALT_FOCUSABLE_IM` and
+  `SOFT_INPUT_STATE_UNCHANGED`, so it never becomes the input method's target: without both, every
+  clipboard read unbinds the IME from whatever the user was typing in and the keyboard drops, in
+  every app on the phone.
+- Copy detection must not treat typing as an interaction a copy could follow. A caret move
+  (`fromIndex == toIndex`) and a tap into a text field both *disarm* the heuristic that reads a
+  SystemUI window event as a copy chip; only a selected range or a tap on something that is not an
+  editor arms it. Otherwise the overlay opens several times a second while the user types.
 - Accessibility is not a direct clipboard exemption. Capture is disabled unless the session is
   authenticated, and **Share → Tennanova** is the fallback when an app exposes no copy signal.
 - Clipboard does not sync while the phone is locked (`isDeviceLocked` short-circuits reads in

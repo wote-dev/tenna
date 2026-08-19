@@ -6,14 +6,65 @@ struct TennaNovaApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
 
     var body: some Scene {
+        // The window and the menu bar item are two views onto one AppState, injected
+        // through the environment rather than passed down. A constructor parameter was
+        // fine while `MenuBarView` was the only view; a split view whose every leaf wants
+        // the state is what makes the environment the right shape.
+        Window("Tennanova", id: AppScene.mainWindow) {
+            MainWindow()
+                .environment(delegate.state)
+        }
+        .defaultSize(width: 980, height: 640)
+        // Without this the window tracks the *content's* ideal size, which means switching
+        // from the device pane to a transcript resizes the window under the user — and a
+        // long enough transcript grew it past the bottom of the screen, taking the
+        // composer with it.
+        .windowResizability(.contentMinSize)
+        .commands {
+            CommandGroup(before: .windowList) { OpenMainWindowButton() }
+        }
+
         MenuBarExtra {
-            MenuBarView(state: delegate.state)
+            MenuBarView()
+                .environment(delegate.state)
         } label: {
             Image(systemName: delegate.state.status.isConnected
                   ? "iphone.badge.play"
-                  : "iphone.slash")
+                  : delegate.state.serverActivity.isAttempting
+                      ? "arrow.triangle.2.circlepath"
+                      : "iphone.slash")
         }
         .menuBarExtraStyle(.window)
+    }
+}
+
+enum AppScene {
+    static let mainWindow = "main"
+}
+
+/// `openWindow` is handed out only inside a view, and neither the app delegate nor the
+/// menu bar popover is one. The action stays valid after the window it opens is closed,
+/// so capturing it once — from the window itself — is enough to reopen the scene from
+/// anywhere afterwards.
+@MainActor
+enum MainWindowOpener {
+    static var reopen: (() -> Void)?
+
+    static func show() {
+        reopen?()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+struct OpenMainWindowButton: View {
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Button("Tennanova Window") {
+            openWindow(id: AppScene.mainWindow)
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        .keyboardShortcut("0", modifiers: .command)
     }
 }
 
@@ -24,10 +75,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     let state = AppState()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // Menu bar only — no Dock icon, no main window.
-        NSApp.setActivationPolicy(.accessory)
+        // A regular Dock application that keeps its menu bar item. `.accessory` here —
+        // and `LSUIElement` in Info.plist — is what used to suppress the Dock icon and
+        // any main window along with it.
+        NSApp.setActivationPolicy(.regular)
         Log.info("TennaNova starting")
         state.start()
+    }
+
+    /// Clicking the Dock icon with every window closed. Without this the click activates
+    /// an app that then shows nothing, which reads exactly like a hang.
+    func applicationShouldHandleReopen(_ sender: NSApplication,
+                                       hasVisibleWindows: Bool) -> Bool {
+        guard !hasVisibleWindows else { return true }
+        MainActor.assumeIsolated { MainWindowOpener.show() }
+        return true
+    }
+
+    /// Closing the window leaves the phone connected. Mirrored notifications and
+    /// clipboard sync are most of the value and neither needs a window on screen.
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -29,10 +29,10 @@ import com.tennanova.core.RuntimeStatusStore
 class TennaAccessibilityService : AccessibilityService() {
 
     private val handler = Handler(Looper.getMainLooper())
+    private val copySignals = CopySignalDetector()
     private var overlay: View? = null
     private var captureScheduled = false
     private var lastCaptureAt = 0L
-    private var lastInteractionAt = 0L
     private var lastClipStamp = UNKNOWN_CLIP_STAMP
     private var lastSeenFingerprint: String? = null
     private val clipboardRead = Runnable(::readClipboardAndRemoveOverlay)
@@ -86,36 +86,8 @@ class TennaAccessibilityService : AccessibilityService() {
         return super.onUnbind(intent)
     }
 
-    private fun isLikelyCopySignal(event: AccessibilityEvent): Boolean {
-        val now = android.os.SystemClock.elapsedRealtime()
-        val packageName = event.packageName?.toString().orEmpty().lowercase()
-        val className = event.className?.toString().orEmpty().lowercase()
-        val text = event.text.joinToString(" ").lowercase()
-        val description = event.contentDescription?.toString().orEmpty().lowercase()
-        val metadata = "$className $text $description"
-
-        if (event.action == android.view.accessibility.AccessibilityNodeInfo.ACTION_COPY) return true
-        if ("clipboard" in metadata || "copied" in metadata) return true
-
-        // SystemUI raises its clipboard chip immediately after a copy. Requiring a recent
-        // *touch* rather than a recent text selection is what lets image copies through:
-        // selecting text is a thing only text copies do, so an image copy never opened this
-        // window and was caught only when the chip happened to describe itself.
-        if (packageName == SYSTEM_UI_PACKAGE && event.eventType in WINDOW_EVENT_TYPES &&
-            now - lastInteractionAt <= INTERACTION_COPY_WINDOW_MS) return true
-
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_TEXT_SELECTION_CHANGED ||
-            event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            lastInteractionAt = now
-        }
-
-        // Copy context-menu clicks are the most common signal on apps whose SystemUI
-        // clipboard overlay does not expose a descriptive class name.
-        if (event.eventType == AccessibilityEvent.TYPE_VIEW_CLICKED) {
-            return looksLikeCopyCommand(text) || looksLikeCopyCommand(description)
-        }
-        return false
-    }
+    private fun isLikelyCopySignal(event: AccessibilityEvent): Boolean =
+        copySignals.isCopySignal(event.copyFacts(), android.os.SystemClock.elapsedRealtime())
 
     /**
      * The clip's metadata timestamp, which moves on every real copy.
@@ -163,12 +135,18 @@ class TennaAccessibilityService : AccessibilityService() {
             WindowManager.LayoutParams.TYPE_ACCESSIBILITY_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                 WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                // The window has to take focus — that is the whole reason it exists — but it
+                // must not become the *input method's* target while it does. Without this the
+                // IME unbinds from whatever the user was typing in and the keyboard drops,
+                // in every app on the phone, every time a copy is read.
+                WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
             x = 0
             y = 0
+            softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNCHANGED
             title = "Tennanova clipboard read"
         }
 
@@ -228,17 +206,10 @@ class TennaAccessibilityService : AccessibilityService() {
 
     companion object {
         private const val TAG = "TennaClipboard"
-        private const val SYSTEM_UI_PACKAGE = "com.android.systemui"
         private const val EVENT_SETTLE_MS = 80L
         private const val FOCUS_SETTLE_MS = 32L
         private const val CAPTURE_COOLDOWN_MS = 250L
-        private const val INTERACTION_COPY_WINDOW_MS = 2_000L
         private const val UNKNOWN_CLIP_STAMP = -1L
-        private val WINDOW_EVENT_TYPES = setOf(
-            AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
-            AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED,
-            AccessibilityEvent.TYPE_WINDOWS_CHANGED
-        )
 
         fun isEnabled(context: Context): Boolean {
             val expected = ComponentName(context, TennaAccessibilityService::class.java)

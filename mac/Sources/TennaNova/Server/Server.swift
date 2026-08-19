@@ -1,6 +1,29 @@
 import Foundation
 import Network
 
+enum ServerActivity: Equatable {
+    case idle
+    case securing
+    case authenticating
+    case failed(String)
+
+    var label: String? {
+        switch self {
+        case .idle:                 return nil
+        case .securing:             return "Phone found — securing connection…"
+        case .authenticating:       return "Phone connected — verifying pairing…"
+        case .failed(let message):  return message
+        }
+    }
+
+    var isAttempting: Bool {
+        switch self {
+        case .securing, .authenticating: return true
+        case .idle, .failed:             return false
+        }
+    }
+}
+
 /// TLS + WebSocket listener, advertised over Bonjour.
 ///
 /// Design notes proven by spike (see git history / plan):
@@ -17,8 +40,12 @@ final class Server {
     /// validates their hello, so a port probe or a second Mac cannot knock this one off.
     private(set) var session: PeerSession?
     private var peers: [UUID: PeerSession] = [:]
+    private var activityPeerID: UUID?
+    private var activity: ServerActivity = .idle
+    private var activityVersion = 0
 
     var onSessionChanged: ((PeerSession?) -> Void)?
+    var onActivityChanged: ((ServerActivity) -> Void)?
     var onMessage: ((PeerSession, Envelope, Data) -> Void)?
     var onBinary: ((PeerSession, Data) -> Void)?
 
@@ -71,6 +98,8 @@ final class Server {
         peers.values.forEach { $0.close() }
         peers.removeAll()
         session = nil
+        activityPeerID = nil
+        emitActivity(.idle)
         listener?.cancel()
         listener = nil
     }
@@ -81,8 +110,16 @@ final class Server {
         guard peers[peer.id] != nil else { return }
         let previous = session
         session = peer
+        activityPeerID = nil
+        emitActivity(.idle)
         onSessionChanged?(peer)
         if previous?.id != peer.id { previous?.close() }
+    }
+
+    /// Preserves the reason long enough for the menu to explain a rejected scan.
+    func noteAuthenticationFailure(_ peer: PeerSession, message: String) {
+        guard activityPeerID == peer.id else { return }
+        emitActivity(.failed(message), clearAfter: 12)
     }
 
     // MARK: - Internals
@@ -105,6 +142,8 @@ final class Server {
         let peer = PeerSession(connection: conn, queue: queue)
         let peerID = peer.id
         peers[peerID] = peer
+        activityPeerID = peerID
+        emitActivity(.securing)
         peer.onMessage = { [weak self, weak peer] env, data in
             guard let self, let peer else { return }
             self.onMessage?(peer, env, data)
@@ -113,15 +152,42 @@ final class Server {
             guard let self, let peer else { return }
             self.onBinary?(peer, data)
         }
-        peer.onClosed = { [weak self] _ in
+        peer.onReady = { [weak self] in
+            guard let self, self.activityPeerID == peerID else { return }
+            self.emitActivity(.authenticating)
+        }
+        peer.onClosed = { [weak self] error in
             guard let self else { return }
             self.peers.removeValue(forKey: peerID)
             // A rejected or failed candidate never disturbs the authenticated session.
             if self.session?.id == peerID {
                 self.session = nil
+                self.emitActivity(.idle)
                 self.onSessionChanged?(nil)
+            } else if self.activityPeerID == peerID {
+                self.activityPeerID = nil
+                if case .failed = self.activity {
+                    // AppState already supplied the useful authentication reason.
+                } else {
+                    let reason = error?.localizedDescription
+                        ?? "Phone disconnected before pairing completed."
+                    self.emitActivity(.failed(reason), clearAfter: 12)
+                }
             }
         }
         peer.start()
+    }
+
+    private func emitActivity(_ next: ServerActivity, clearAfter seconds: TimeInterval? = nil) {
+        activity = next
+        activityVersion += 1
+        let version = activityVersion
+        onActivityChanged?(next)
+        guard let seconds else { return }
+        queue.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self, self.activityVersion == version else { return }
+            self.activity = .idle
+            self.onActivityChanged?(.idle)
+        }
     }
 }

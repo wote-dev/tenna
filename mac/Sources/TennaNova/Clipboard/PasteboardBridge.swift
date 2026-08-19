@@ -9,6 +9,35 @@ enum ClipboardPayload {
     case image(data: Data, mime: String, sha256: String, name: String?)
 }
 
+/// What the phone is known to be holding, and therefore what it must not be sent again.
+///
+/// Content the phone *sent us* counts every bit as much as content we sent it, and that is
+/// the whole reason this is a type rather than a stray `String?`. Every push makes Android
+/// raise its own "Copied" panel, so re-pushing a clip that started on the phone — which a
+/// reconnect used to do, because `hello` re-pushes the pasteboard — shows the user a second
+/// panel for one copy.
+struct PeerClipboardState {
+
+    private var fingerprint: String?
+
+    /// True when this content is new to the phone; records it as sent.
+    mutating func shouldSend(_ candidate: String) -> Bool {
+        guard candidate != fingerprint else { return false }
+        fingerprint = candidate
+        return true
+    }
+
+    /// Records content that arrived from the phone, which by definition already has it.
+    mutating func note(_ candidate: String) {
+        fingerprint = candidate
+    }
+
+    /// A different phone has paired, so nothing has been sent to *this* peer yet.
+    mutating func reset() {
+        fingerprint = nil
+    }
+}
+
 /// Mirrors text and one image at a time between NSPasteboard and the phone.
 final class PasteboardBridge {
 
@@ -20,9 +49,7 @@ final class PasteboardBridge {
     private var timer: Timer?
     private var seq = 0
     private var peerSupportsImages = false
-    private var lastAppliedRemoteHash: String?
-    /// What was last handed to the phone, so a reconnect doesn't re-push it.
-    private var lastEmittedFingerprint: String?
+    private var peer = PeerClipboardState()
 
     init(pasteboard: NSPasteboard = .general) {
         self.pasteboard = pasteboard
@@ -51,18 +78,21 @@ final class PasteboardBridge {
         DispatchQueue.main.async { [weak self] in self?.peerSupportsImages = supported }
     }
 
-    /// Pushes the current pasteboard to a phone that has just said hello. Skips content
-    /// the phone was already sent: every push makes Android show its system "Copied"
-    /// panel, so a flapping socket would otherwise spam the phone once per reconnect.
+    /// Pushes the current pasteboard to a phone that has just said hello. Skips content the
+    /// phone already has, so a flapping socket doesn't spam it once per reconnect.
     func sendCurrentIfAny() {
         DispatchQueue.main.async { [weak self] in
-            self?.emitCurrentPasteboard(skippingAlreadySent: true)
+            guard let self else { return }
+            self.emitCurrentPasteboard()
+            // The poll compares against this; leaving it stale would let the next tick emit
+            // the very clip we just considered.
+            self.lastChangeCount = self.pasteboard.changeCount
         }
     }
 
     /// A different phone has paired, so nothing has been sent to *this* peer yet.
     func resetPeerState() {
-        DispatchQueue.main.async { [weak self] in self?.lastEmittedFingerprint = nil }
+        DispatchQueue.main.async { [weak self] in self?.peer.reset() }
     }
 
     private func poll() {
@@ -72,15 +102,15 @@ final class PasteboardBridge {
         emitCurrentPasteboard()
     }
 
-    private func emitCurrentPasteboard(skippingAlreadySent: Bool = false) {
+    /// Emits the pasteboard unless the phone already has exactly this content.
+    ///
+    /// The check is unconditional rather than reconnect-only. Suppressing an *identical
+    /// consecutive* emission costs nothing — the phone's clipboard already holds it — while
+    /// letting one through costs a duplicate system panel, and a `hello` landing just before
+    /// a poll tick made that a routine race rather than an edge case.
+    private func emitCurrentPasteboard() {
         if peerSupportsImages, let image = imagePayload() {
-            if image.sha256 == lastAppliedRemoteHash {
-                lastAppliedRemoteHash = nil
-                return
-            }
-            let fingerprint = "image:\(image.sha256)"
-            if skippingAlreadySent, fingerprint == lastEmittedFingerprint { return }
-            lastEmittedFingerprint = fingerprint
+            guard peer.shouldSend("image:\(image.sha256)") else { return }
             seq += 1
             Log.info("image copied on Mac (\(image.data.count) bytes) -> phone")
             onTransferStatus?("Sending image to phone…")
@@ -90,9 +120,7 @@ final class PasteboardBridge {
         }
 
         guard let text = pasteboard.string(forType: .string), !text.isEmpty else { return }
-        let fingerprint = "text:\(text)"
-        if skippingAlreadySent, fingerprint == lastEmittedFingerprint { return }
-        lastEmittedFingerprint = fingerprint
+        guard peer.shouldSend("text:\(text)") else { return }
         seq += 1
         Log.info("clipboard copied on Mac (\(text.count) chars) -> phone")
         onLocalCopy?(.text(text), seq)
@@ -102,11 +130,14 @@ final class PasteboardBridge {
         guard !text.isEmpty else { return }
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
+            // Recorded before the early return as well: the phone demonstrably has this text
+            // either way, and forgetting that is what used to send it straight back on the
+            // next reconnect.
+            self.peer.note("text:\(text)")
             if self.pasteboard.string(forType: .string) == text { return }
             self.pasteboard.clearContents()
             self.pasteboard.setString(text, forType: .string)
             self.lastChangeCount = self.pasteboard.changeCount
-            self.lastAppliedRemoteHash = nil
             self.onTransferStatus?("Text received from phone")
             Log.info("clipboard from phone applied (\(text.count) chars)")
         }
@@ -123,21 +154,26 @@ final class PasteboardBridge {
         DispatchQueue.main.async { [weak self] in
             guard let self else { return }
             self.pasteboard.clearContents()
-            var wrote = false
-            if mime == "image/png" {
-                wrote = self.pasteboard.setData(data, forType: .png)
+            var written: Data?
+            if mime == "image/png", self.pasteboard.setData(data, forType: .png) {
+                written = data
             }
-            if !wrote, let png = Self.pngData(for: image) {
-                wrote = self.pasteboard.setData(png, forType: .png)
+            if written == nil, let png = Self.pngData(for: image),
+               self.pasteboard.setData(png, forType: .png) {
+                written = png
             }
             if let tiff = image.tiffRepresentation {
                 _ = self.pasteboard.setData(tiff, forType: .tiff)
             }
-            guard wrote else {
+            guard let written else {
                 self.onTransferStatus?("Couldn’t write image to the Mac clipboard")
                 return
             }
-            self.lastAppliedRemoteHash = sha256
+            // The hash of what actually landed, not of what arrived. A phone JPEG is
+            // re-encoded to PNG on the way in, so noting the phone's hash would leave the
+            // pasteboard holding bytes we had no record of sending — and the next reconnect
+            // would push them back as a "new" image.
+            self.peer.note("image:\(Self.sha256(written))")
             self.lastChangeCount = self.pasteboard.changeCount
             self.onTransferStatus?("Image received from phone")
             Log.info("clipboard image from phone applied (\(data.count) bytes)")

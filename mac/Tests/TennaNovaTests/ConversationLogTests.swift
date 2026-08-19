@@ -182,6 +182,76 @@ struct ConversationLogTests {
         #expect(log.threadsByRecency[0].messages.count == 3)
     }
 
+    // MARK: - Sidebar preview
+
+    @Test func aGroupChatPreviewNamesWhoeverSpoke() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(senderName: "Sam", conversationTitle: "Weekend plans"))
+
+        // Without the name, "are you close?" in a group of six says nothing at all.
+        #expect(log.threadsByRecency[0].preview == "Sam: are you close?")
+    }
+
+    @Test func aOneToOnePreviewDoesNotRepeatTheRowTitle() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+
+        let thread = log.threadsByRecency[0]
+        #expect(thread.title == "Sam")
+        #expect(thread.preview == "are you close?")
+    }
+
+    @Test func ourOwnReplyPreviewsAsOurs() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        log.appendOutgoing("five minutes", to: .conversation(pkg: "com.whatsapp", title: "Sam"))
+
+        #expect(log.threadsByRecency[0].preview == "You: five minutes")
+    }
+
+    // MARK: - Restoring
+
+    @Test func aReplyStillInFlightAtQuitIsNotLeftSpinning() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        log.appendOutgoing("five minutes", to: key)
+
+        log.normalizeAfterRestore()
+
+        // Nothing will ever reconcile it, so a spinner that never resolves would be a lie.
+        #expect(log[key]?.messages.last?.delivery == .failed("Not sent — Tennanova quit"))
+    }
+
+    @Test func aRestoredThreadCannotBeRepliedToUntilThePhoneResyncs() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        #expect(log.replyTarget(for: key) != nil)
+
+        log.normalizeAfterRestore()
+        // `latestKey` addresses a notification from a session that is over; `actionId` is
+        // a positional index into it. Firing either would hit the wrong thing or nothing.
+        #expect(log.replyTarget(for: key) == nil)
+
+        // The phone re-asserts both by replaying what is still on its screen.
+        log.ingest(makeNotification(key: "k2", title: "Sam", senderName: "Sam", resync: true))
+        #expect(log.replyTarget(for: key) != nil)
+    }
+
+    @Test func restoringKeepsTheTranscriptAndTheUnreadCount() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "k1", body: "one"))
+        log.ingest(makeNotification(key: "k2", body: "two"))
+        let before = log.threadsByRecency[0]
+
+        log.normalizeAfterRestore()
+
+        let after = log.threadsByRecency[0]
+        #expect(after.messages.map(\.body) == before.messages.map(\.body))
+        #expect(after.unreadCount == 2)
+    }
+
     // MARK: - Retention
 
     @Test func aThreadStopsGrowingAtItsCap() {
@@ -267,5 +337,62 @@ struct IconRequestPolicyTests {
 
         #expect(first)
         #expect(again)
+    }
+}
+
+/// The transcript has to reach the disk: `ConversationLog` has been `Codable` since it
+/// was written and nothing ever wrote it, so every quit threw the history away.
+struct ConversationArchiveTests {
+
+    @Test func nothingSavedReadsAsNothing() {
+        withTemporaryArchive { archive in
+            #expect(archive.load() == nil)
+        }
+    }
+
+    @Test func aSavedTranscriptComesBackWhole() {
+        withTemporaryArchive { archive in
+            var log = ConversationLog()
+            log.ingest(makeNotification(key: "k1", body: "one", senderName: "Sam",
+                                        conversationTitle: "Weekend plans"))
+            log.ingest(makeNotification(key: "k2", body: "two", senderName: "Ana",
+                                        conversationTitle: "Weekend plans"))
+            archive.save(log)
+
+            let restored = archive.load()
+            let thread = restored?.threadsByRecency.first
+            #expect(restored?.threads.count == 1)
+            #expect(thread?.title == "Weekend plans")
+            #expect(thread?.messages.map(\.body) == ["one", "two"])
+            #expect(thread?.messages.map(\.senderName) == ["Sam", "Ana"])
+        }
+    }
+
+    @Test func loadingNormalisesWhatTheSavedStateCanNoLongerClaim() {
+        withTemporaryArchive { archive in
+            var log = ConversationLog()
+            let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+            log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+            log.appendOutgoing("five minutes", to: key)
+            archive.save(log)
+
+            // Loading, not just `normalizeAfterRestore`, is what has to do this — every
+            // relaunch goes through here and nothing else.
+            let restored = archive.load()
+            #expect(restored?[key]?.isLiveOnPhone == false)
+            #expect(restored?[key]?.messages.last?.delivery == .failed("Not sent — Tennanova quit"))
+        }
+    }
+
+    @Test func aCorruptFileIsNotFatal() {
+        withTemporaryArchive { archive in
+            var log = ConversationLog()
+            log.ingest(makeNotification())
+            archive.save(log)
+            archive.delete()
+
+            // A history that cannot be read is not worth refusing to launch over.
+            #expect(archive.load() == nil)
+        }
     }
 }

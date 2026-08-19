@@ -2,7 +2,6 @@ package com.tennanova.ui
 
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertCountEquals
-import androidx.compose.ui.test.assertDoesNotExist
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onAllNodesWithText
@@ -37,7 +36,8 @@ class DashboardScreenTest {
     }
 
     @Test fun connectingStateExplainsPendingPairing() {
-        render(MainUiState(paired = true, host = "mac.local",
+        render(MainUiState(paired = true, host = "mac.local", listenerEnabled = true,
+            connectionServiceRunning = true,
             connection = ConnectionStatus.CONNECTING))
         compose.onNodeWithText("Finishing pairing…").assertIsDisplayed()
         compose.onNodeWithText("Pairing pending").assertIsDisplayed()

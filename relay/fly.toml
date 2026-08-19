@@ -1,0 +1,21 @@
+# Fly.io keeps a plain WebSocket connection open for as long as both ends want it and
+# terminates TLS for us, which is what this needs. Any host that does the same works —
+# Railway, Render, a VPS behind Caddy. Serverless functions do not: they cap request
+# duration, and a Tennanova session is meant to idle for hours.
+app = "tennanova-relay"
+primary_region = "syd"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  # A relay with no phones connected still has to be reachable the moment one wakes up.
+  auto_stop_machines = false
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

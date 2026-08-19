@@ -1,5 +1,6 @@
 package com.tennanova.core
 
+import com.tennanova.net.RelayConfig
 import org.json.JSONArray
 import org.json.JSONObject
 import java.util.Base64
@@ -15,8 +16,18 @@ object Proto {
     const val BONJOUR_TYPE = "_tennanova._tcp"
     const val DEFAULT_PORT = 18777
     const val IMAGE_CLIPBOARD_CAPABILITY = "clip.image.v1"
+
+    /**
+     * This build keeps a notification's reply action after the notification is gone, and
+     * reports the outcome of every reply as `notif.reply.result`.
+     *
+     * The Mac needs to be told, because it decides whether to offer a composer for a
+     * conversation the phone is no longer showing. Against a phone without this it must
+     * keep refusing, or replies would be dropped in silence.
+     */
+    const val OFFLINE_REPLY_CAPABILITY = "notif.reply.offline.v1"
     const val MAX_IMAGE_BYTES = 25 * 1024 * 1024
-    val CAPABILITIES = listOf(IMAGE_CLIPBOARD_CAPABILITY)
+    val CAPABILITIES = listOf(IMAGE_CLIPBOARD_CAPABILITY, OFFLINE_REPLY_CAPABILITY)
 
     fun envelope(type: String): JSONObject =
         JSONObject().put("v", VERSION).put("type", type)
@@ -33,7 +44,13 @@ data class PairingPayload(
      * Every address the Mac answers on, `host` first. Additive within v1 — an older Mac
      * sends only `host`, and the list is then just that one entry.
      */
-    val hosts: List<String> = listOf(host)
+    val hosts: List<String> = listOf(host),
+    /**
+     * How to reach this Mac when the local network carries nothing between its own
+     * clients. Absent when the Mac has no relay, or has not reached it yet.
+     */
+    val relayHost: String? = null,
+    val relayRoom: String? = null
 ) {
     companion object {
         fun parse(raw: String): PairingPayload? {
@@ -48,12 +65,23 @@ data class PairingPayload(
                 val hosts = (listOf(host) + hostList(o.optJSONArray("hosts")))
                     .filter { isValidHost(it) }
                     .distinct()
+                // Both or neither: half a relay target is a guaranteed doomed round trip
+                // on every reconnect, and it is silently useless rather than loudly wrong.
+                val relayHost = o.optString("relayHost").trim()
+                    .takeIf { RelayConfig.isValidHost(it) }
+                val relayRoom = o.optString("relayRoom").trim()
+                    .takeIf { RelayConfig.isValidRoom(it) }
+                val relay = if (relayHost != null && relayRoom != null) {
+                    relayHost to relayRoom
+                } else null
                 if (!isValidHost(host) ||
                     port !in 1..65535 ||
                     usbPort != null && usbPort !in 1..65535 ||
                     runCatching { Base64.getDecoder().decode(spki).size }.getOrNull() != 32 ||
                     runCatching { Base64.getDecoder().decode(token).size }.getOrNull() != 32
-                ) null else PairingPayload(host, port, spki, token, usbPort, hosts)
+                ) null else PairingPayload(
+                    host, port, spki, token, usbPort, hosts, relay?.first, relay?.second
+                )
             } catch (_: Exception) {
                 null
             }
@@ -144,6 +172,25 @@ object Messages {
 
     fun notifRemoved(key: String): JSONObject =
         Proto.envelope("notif.removed").put("key", key)
+
+    /**
+     * The fate of one `notif.reply`. `clientId` is echoed straight back from the request
+     * so the Mac can find the bubble it belongs to; it is absent from older Mac builds,
+     * and then this is informational only.
+     */
+    fun notifReplyResult(
+        clientId: String?,
+        key: String,
+        actionId: Int,
+        ok: Boolean,
+        error: String?
+    ): JSONObject = Proto.envelope("notif.reply.result").apply {
+        clientId?.let { put("clientId", it) }
+        put("key", key)
+        put("actionId", actionId)
+        put("ok", ok)
+        error?.let { put("error", it) }
+    }
 
     fun iconData(hash: String, bytes: Int): JSONObject =
         Proto.envelope("icon.data").put("hash", hash).put("bytes", bytes)

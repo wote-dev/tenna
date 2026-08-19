@@ -29,11 +29,13 @@ enum ConnectionStatus: Equatable {
 final class AppState {
 
     private(set) var status: ConnectionStatus = .starting
+    private(set) var serverActivity: ServerActivity = .idle
     private(set) var pairedDevice: DeviceInfo?
     private(set) var battery: Int?
     private(set) var charging: Bool = false
     private(set) var lastTransferStatus: String?
     private(set) var usbStatus: USBBridgeStatus = .searching
+    private(set) var relayStatus: RelayStatus = .disabled
 
     /// Whether a phone is paired at all. Distinct from `pairedDevice`, which is cleared
     /// on every disconnect — this is what lets the menu bar offer Unpair while offline.
@@ -58,10 +60,14 @@ final class AppState {
     /// Everything the phone has mirrored, grouped into conversations.
     let history = NotificationStore()
 
+    /// App icons and contact photos, in a form the window can draw and observe.
+    let icons: IconCatalog
+
     @ObservationIgnored private var server: Server?
     @ObservationIgnored private var notifications: NotificationPresenter?
     @ObservationIgnored private var clipboard: PasteboardBridge?
     @ObservationIgnored private let usbBridge = ADBBridge()
+    @ObservationIgnored private var relayBridge: RelayBridge?
     @ObservationIgnored private let pathMonitor = NWPathMonitor()
     @ObservationIgnored private let pathQueue = DispatchQueue(label: "com.tennanova.path")
     @ObservationIgnored private let store = PairingStore()
@@ -69,8 +75,13 @@ final class AppState {
     @ObservationIgnored private var peerCapabilities = Set<String>()
     @ObservationIgnored private var pendingBinary: PendingBinary?
     /// Shared with `NotificationPresenter` so the cards and the window read one store.
-    @ObservationIgnored private let icons = IconCache()
+    @ObservationIgnored private let iconCache: IconCache
     @ObservationIgnored private var iconRequests = IconRequestPolicy()
+
+    init(iconCache: IconCache = IconCache()) {
+        self.iconCache = iconCache
+        self.icons = IconCatalog(cache: iconCache)
+    }
 
     private enum PendingBinary {
         case icon(sessionID: UUID, hash: String, bytes: Int)
@@ -82,7 +93,7 @@ final class AppState {
             let server = try Server()
             self.server = server
 
-            let presenter = NotificationPresenter(icons: icons)
+            let presenter = NotificationPresenter(icons: iconCache)
             presenter.onReply = { [weak self] key, actionId, text in
                 self?.send(NotifReply(key: key, actionId: actionId, text: text))
             }
@@ -129,6 +140,9 @@ final class AppState {
                     self.pairedDevice = nil
                 }
             }
+            server.onActivityChanged = { [weak self] activity in
+                Task { @MainActor in self?.serverActivity = activity }
+            }
             server.onMessage = { [weak self] session, env, data in
                 self?.handle(env: env, data: data, session: session)
             }
@@ -153,6 +167,32 @@ final class AppState {
                 }
             }
             usbBridge.start(port: Int(server.port))
+
+            // The relay's room name belongs in the QR, and a relay that comes up later
+            // has to reach phones that are already paired — hence the payload rebuild
+            // and the mid-session address update, exactly as USB does above.
+            let relay = RelayBridge(secret: store.relaySecret)
+            relay.onStatus = { [weak self] status in
+                Task { @MainActor in
+                    guard let self else { return }
+                    let wasOnline = self.relayStatus.isOnline
+                    self.relayStatus = status
+                    if wasOnline != status.isOnline {
+                        self.rebuildPairingPayload()
+                        self.sendHostsUpdate()
+                    }
+                }
+            }
+            self.relayBridge = relay
+            relay.start(localPort: server.port)
+            // Same queue every ingest hops through, so the restore cannot land on top of
+            // a message that arrived first. Off the launch path because it reads a file.
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    self.icons.warm(self.history.restore())
+                }
+            }
+
             isPaired = store.paired != nil
             pairedDeviceName = store.paired?.name
             rebuildPairingPayload()
@@ -167,8 +207,12 @@ final class AppState {
     }
 
     func stop() {
+        // Called from `applicationWillTerminate`, i.e. the main thread, and there is no
+        // "in two seconds" left to debounce into.
+        MainActor.assumeIsolated { history.flush() }
         pathMonitor.cancel()
         usbBridge.stop()
+        relayBridge?.stop()
         clipboard?.stop()
         server?.stop()
     }
@@ -185,6 +229,7 @@ final class AppState {
         status = .waitingForPhone
         // A different phone's conversations must not survive into the next pairing.
         history.clearAll()
+        icons.clearAll()
     }
 
     // MARK: - Message routing
@@ -257,6 +302,9 @@ final class AppState {
 
     private func handleHello(data: Data, session: PeerSession) {
         guard let hello = try? Wire.decode(Hello.self, from: data) else {
+            server?.noteAuthenticationFailure(
+                session, message: "Pairing failed — the phone sent invalid pairing data."
+            )
             session.send(HelloNack(reason: "bad_hello")) { session.close() }
             return
         }
@@ -276,6 +324,10 @@ final class AppState {
             Log.info("paired with \(hello.device.name)")
         } else {
             Log.warn("rejecting \(hello.device.name): bad token")
+            server?.noteAuthenticationFailure(
+                session,
+                message: "Pairing rejected — scan the current code shown by this Mac."
+            )
             session.send(HelloNack(reason: "bad_token")) { session.close() }
             return
         }
@@ -295,7 +347,9 @@ final class AppState {
             macName: Host.current().localizedName ?? "Mac",
             hosts: advertisedHosts,
             port: macPort,
-            usbPort: usbStatus.isReady ? macPort : nil
+            usbPort: usbStatus.isReady ? macPort : nil,
+            relayHost: relayHostIfOnline,
+            relayRoom: relayRoomIfOnline
         ))
 
         let didPair = issued != nil
@@ -334,6 +388,7 @@ final class AppState {
             // The hash starts fresh if it is ever needed again, and the window is told so
             // rows holding this icon or avatar can redraw.
             iconRequests.received(hash)
+            icons.received(data, hash: hash)
 
         case .image(let sessionID, let header):
             guard sessionID == session.id, data.count == header.bytes,
@@ -390,7 +445,10 @@ final class AppState {
     /// Both hashes, not just the icon: the window shows sender photos, and `avatarHash` has
     /// travelled on the wire since the beginning without anyone ever requesting it.
     private func requestAssets(for n: NotifPosted) {
-        for hash in [n.iconHash, n.avatarHash].compactMap({ $0 }) where !icons.has(hash) {
+        // Already on disk from an earlier session or an earlier message: nothing to ask
+        // for, but the window has not decoded it yet.
+        icons.warm([n.iconHash, n.avatarHash])
+        for hash in [n.iconHash, n.avatarHash].compactMap({ $0 }) where !iconCache.has(hash) {
             guard iconRequests.shouldRequest(hash) else { continue }
             send(IconRequest(hash: hash))
         }
@@ -445,7 +503,17 @@ final class AppState {
         guard let server else { return }
         send(MacHosts(hosts: advertisedHosts,
                       port: Int(server.port),
-                      usbPort: usbStatus.isReady ? Int(server.port) : nil))
+                      usbPort: usbStatus.isReady ? Int(server.port) : nil,
+                      relayHost: relayHostIfOnline,
+                      relayRoom: relayRoomIfOnline))
+    }
+
+    private var relayHostIfOnline: String? {
+        relayStatus.isOnline ? Relay.host : nil
+    }
+
+    private var relayRoomIfOnline: String? {
+        relayStatus.isOnline ? relayBridge?.roomId : nil
     }
 
     /// Rebuilds the QR from the live server identity, addresses, token and USB state.
@@ -470,6 +538,12 @@ final class AppState {
         // the adb binary is bundled, so it stayed true with no phone attached — and the
         // phone then spent its first connection attempt on a loopback port nothing served.
         if usbStatus.isReady { payload["usbPort"] = Int(server.port) }
+        // Only while the relay has actually accepted us. Advertising a room no Mac is
+        // hosting would cost the phone a doomed round trip on every reconnect.
+        if let host = relayHostIfOnline, let room = relayRoomIfOnline {
+            payload["relayHost"] = host
+            payload["relayRoom"] = room
+        }
         if let data = try? JSONSerialization.data(withJSONObject: payload),
            let str = String(data: data, encoding: .utf8) {
             pairingPayload = str

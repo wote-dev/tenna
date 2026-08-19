@@ -166,6 +166,70 @@ struct NotificationReplayGuard {
     }
 }
 
+/// Decides which mirrored cards may be reported to the phone as user-dismissed.
+///
+/// macOS never says "the user swiped this away", so dismissal is detected by diffing what
+/// we believe is on screen against `getDeliveredNotifications`. The subtlety, and the bug
+/// that made this a type of its own: a card that has *never* been in Notification Center
+/// cannot have been dismissed from it. On a Mac that retains nothing — the delivered list
+/// comes back empty on every poll — treating "never arrived" as "swiped away" told the
+/// phone to cancel every mirrored notification about two seconds after it arrived, and
+/// cancelling a notification on Android destroys the `RemoteInput` intent that replying
+/// to it depends on.
+///
+/// So a key posted here is only *watched*; it becomes dismissible once it has actually
+/// been observed on screen.
+///
+/// Pure, and split out for the same reason `NotificationReplayGuard` is: all the
+/// behaviour worth testing lives here, and none of it needs a notification centre.
+struct DismissalWatch {
+
+    /// Bounds `awaiting` on a Mac where nothing is ever delivered, so it cannot grow with
+    /// every notification for as long as the app runs.
+    static let awaitingLimit = 200
+
+    /// Seen on screen at least once, and believed to still be there.
+    private(set) var live = Set<String>()
+    /// Posted, not yet seen. Not dismissible.
+    private(set) var awaiting = Set<String>()
+    private var awaitingOrder: [String] = []
+
+    /// We handed this to macOS and it accepted it. That is not the same as it appearing.
+    mutating func posted(_ key: String) {
+        guard !live.contains(key), awaiting.insert(key).inserted else { return }
+        awaitingOrder.append(key)
+        while awaitingOrder.count > Self.awaitingLimit {
+            awaiting.remove(awaitingOrder.removeFirst())
+        }
+    }
+
+    /// Found in Notification Center at launch — observed by definition.
+    mutating func observed(_ key: String) {
+        forget(key)
+        live.insert(key)
+    }
+
+    /// Folds in a fresh reading of Notification Center. Returns the keys that were on
+    /// screen and no longer are — the only ones a user can have dismissed.
+    mutating func reconcile(onScreen: Set<String>) -> Set<String> {
+        let arrived = awaiting.intersection(onScreen)
+        for key in arrived { forget(key) }
+        live.formUnion(arrived)
+
+        let vanished = live.subtracting(onScreen)
+        live.formIntersection(onScreen)
+        return vanished
+    }
+
+    /// The card is gone for a reason that is not a user dismissal — the phone withdrew it,
+    /// or the user pressed Close and macOS told us so directly.
+    mutating func forget(_ key: String) {
+        live.remove(key)
+        guard awaiting.remove(key) != nil else { return }
+        awaitingOrder.removeAll { $0 == key }
+    }
+}
+
 /// Renders mirrored Android notifications in macOS Notification Center, and reports
 /// what the user does with them back to the phone.
 ///
@@ -184,8 +248,8 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     private let center = UNUserNotificationCenter.current()
     private let icons: IconCache
 
-    /// Notifications we have shown and still believe are on screen.
-    private var live = Set<String>()
+    /// Which shown notifications may be reported to the phone as dismissed.
+    private var dismissals = DismissalWatch()
     /// Keys withdrawn by the phone — so the dismissal poller doesn't echo them back.
     private var withdrawnByPhone = Set<String>()
     private var dismissTimer: Timer?
@@ -284,7 +348,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                 let content = request.content
                 guard let key = content.userInfo["key"] as? String else { continue }
 
-                self.live.insert(key)
+                self.dismissals.observed(key)
                 if let fingerprint = content.userInfo[
                     NotificationPresentationIdentity.fingerprintUserInfoKey
                 ] as? String {
@@ -407,7 +471,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                 self.lock.unlock()
                 Log.error("failed to show notification from \(n.appLabel): \(error.localizedDescription)")
             } else {
-                self.live.insert(n.key)
+                self.dismissals.posted(n.key)
                 self.withdrawnByPhone.remove(n.key)
                 self.replayGuard.recordPresented(
                     key: n.key,
@@ -422,7 +486,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
 
     private func processWithdraw(key: String) {
         lock.lock()
-        live.remove(key)
+        dismissals.forget(key)
         withdrawnByPhone.insert(key)
         replayGuard.forget(key: key)
         legacyDeliveredPresentations.removeValue(forKey: key)
@@ -484,7 +548,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     // MARK: - Dismissal watching
 
     /// macOS never tells us the user swiped a notification away, so diff the delivered
-    /// list against what we believe is live.
+    /// list against what `DismissalWatch` believes is on screen.
     private func startDismissWatcher() {
         dismissTimer?.invalidate()
         dismissTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -498,8 +562,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
             let onScreen = Set(delivered.map { $0.request.identifier })
 
             self.lock.lock()
-            let vanished = self.live.subtracting(onScreen)
-            self.live.formIntersection(onScreen)
+            let vanished = self.dismissals.reconcile(onScreen: onScreen)
             let toReport = vanished.subtracting(self.withdrawnByPhone)
             self.withdrawnByPhone.subtract(vanished)
             for key in vanished {
@@ -540,7 +603,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
             onAction?(key, actionId)
         } else if id == UNNotificationDismissActionIdentifier {
             lock.lock()
-            live.remove(key)
+            dismissals.forget(key)
             replayGuard.clear(key: key)
             legacyDeliveredPresentations.removeValue(forKey: key)
             lock.unlock()
