@@ -26,7 +26,20 @@ object Proto {
      * keep refusing, or replies would be dropped in silence.
      */
     const val OFFLINE_REPLY_CAPABILITY = "notif.reply.offline.v1"
+
+    /**
+     * This phone mirrors the real SMS store: whole threads with history, live arrivals,
+     * and sending to any number — none of it dependent on a notification.
+     *
+     * Advertised only while the user has turned SMS on *and* granted the permissions, so
+     * the Mac can tell "this build cannot" from "this phone has not been asked yet", and
+     * so it knows to stop mirroring the messaging app's notifications: with SMS live those
+     * would show every text twice.
+     */
+    const val SMS_CAPABILITY = "sms.v1"
     const val MAX_IMAGE_BYTES = 25 * 1024 * 1024
+
+    /** Everything this build can do. SMS is added per-connection once it is switched on. */
     val CAPABILITIES = listOf(IMAGE_CLIPBOARD_CAPABILITY, OFFLINE_REPLY_CAPABILITY)
 
     fun envelope(type: String): JSONObject =
@@ -112,7 +125,8 @@ object Messages {
         sdk: Int,
         battery: Int?,
         pairingToken: String?,
-        deviceToken: String?
+        deviceToken: String?,
+        extraCapabilities: List<String> = emptyList()
     ): JSONObject = Proto.envelope("hello").apply {
         pairingToken?.let { put("token", it) }
         deviceToken?.let { put("deviceToken", it) }
@@ -123,7 +137,7 @@ object Messages {
             put("androidSdk", sdk)
             battery?.let { put("battery", it) }
         })
-        put("capabilities", JSONArray(Proto.CAPABILITIES))
+        put("capabilities", JSONArray(Proto.CAPABILITIES + extraCapabilities))
     }
 
     fun deviceState(battery: Int?, charging: Boolean, dnd: Boolean): JSONObject =
@@ -174,6 +188,17 @@ object Messages {
         Proto.envelope("notif.removed").put("key", key)
 
     /**
+     * Every notification key this phone still holds a reply action for.
+     *
+     * The Mac cannot work this out for itself. Its history remembers that a conversation
+     * once offered a reply, but the intent that reply travels through lives only in this
+     * process — a chat cleared before the service was last restarted is gone, and offering
+     * a composer for it promises something that cannot be delivered.
+     */
+    fun notifReplyKeys(keys: Set<String>): JSONObject =
+        Proto.envelope("notif.reply.keys").put("keys", JSONArray(keys.toList()))
+
+    /**
      * The fate of one `notif.reply`. `clientId` is echoed straight back from the request
      * so the Mac can find the bubble it belongs to; it is absent from older Mac builds,
      * and then this is informational only.
@@ -201,6 +226,49 @@ object Messages {
             .put("body", body)
             .put("origin", "android")
             .put("seq", seq)
+
+    // MARK: - SMS
+
+    fun smsThreads(threads: List<SmsThreadWire>): JSONObject =
+        Proto.envelope("sms.threads").put("threads", JSONArray().apply {
+            threads.forEach { t ->
+                put(JSONObject()
+                    .put("id", t.id)
+                    .put("address", t.address)
+                    .put("displayName", t.displayName)
+                    .put("snippet", t.snippet)
+                    .put("when", t.whenMs)
+                    .put("unread", t.unread))
+            }
+        })
+
+    fun smsMessages(threadId: Long, messages: List<SmsMessageWire>, complete: Boolean)
+        : JSONObject = Proto.envelope("sms.messages").apply {
+            put("threadId", threadId)
+            put("complete", complete)
+            put("messages", JSONArray().apply { messages.forEach { put(smsBody(it)) } })
+        }
+
+    fun smsReceived(message: SmsMessageWire): JSONObject =
+        Proto.envelope("sms.received").put("message", smsBody(message))
+
+    fun smsSendResult(clientId: String, ok: Boolean, error: String?, threadId: Long?)
+        : JSONObject = Proto.envelope("sms.send.result").apply {
+            put("clientId", clientId)
+            put("ok", ok)
+            threadId?.let { put("threadId", it) }
+            error?.let { put("error", it) }
+        }
+
+    private fun smsBody(m: SmsMessageWire): JSONObject = JSONObject()
+        .put("id", m.id)
+        .put("threadId", m.threadId)
+        .put("address", m.address)
+        .put("body", m.body)
+        .put("when", m.whenMs)
+        .put("outgoing", m.outgoing)
+        .put("read", m.read)
+        .apply { m.displayName?.let { put("displayName", it) } }
 
     fun clipImage(image: ClipImageHeader): JSONObject =
         Proto.envelope("clip.image")
@@ -239,3 +307,28 @@ data class ClipImageHeader(
         }.getOrNull()
     }
 }
+
+/**
+ * The wire shapes for `sms.*`, kept here beside every other message rather than in the
+ * sms package: `protocol/PROTOCOL.md` is the source of truth and this file is its
+ * counterpart. `com.tennanova.sms` maps its own models onto these.
+ */
+data class SmsThreadWire(
+    val id: Long,
+    val address: String,
+    val displayName: String,
+    val snippet: String,
+    val whenMs: Long,
+    val unread: Int
+)
+
+data class SmsMessageWire(
+    val id: Long,
+    val threadId: Long,
+    val address: String,
+    val displayName: String?,
+    val body: String,
+    val whenMs: Long,
+    val outgoing: Boolean,
+    val read: Boolean
+)

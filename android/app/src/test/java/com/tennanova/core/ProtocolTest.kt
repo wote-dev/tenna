@@ -143,4 +143,33 @@ class ProtocolTest {
         assertEquals(64, original.length)
         assertFalse(original == changed)
     }
+
+    @Test fun replyResultRoundTripsItsClientId() {
+        val json = Messages.notifReplyResult("ABC-123", "0|com.whatsapp|1|x", 0, true, null)
+
+        assertEquals("notif.reply.result", json.getString("type"))
+        assertEquals("ABC-123", json.getString("clientId"))
+        assertEquals(0, json.getInt("actionId"))
+        assertTrue(json.getBoolean("ok"))
+        // Absent rather than null: the Mac decodes this into an optional.
+        assertFalse(json.has("error"))
+    }
+
+    @Test fun replyResultCarriesTheReasonItFailed() {
+        val json = Messages.notifReplyResult(null, "k1", 2, false, "The app withdrew it.")
+
+        assertFalse(json.has("clientId"))
+        assertFalse(json.getBoolean("ok"))
+        assertEquals("The app withdrew it.", json.getString("error"))
+    }
+
+    @Test fun theOfflineReplyCapabilityIsAdvertised() {
+        val hello = Messages.hello("id", "Phone", "model", 33, 80, null, "token")
+        val caps = hello.getJSONArray("capabilities")
+        val advertised = (0 until caps.length()).map { caps.getString(it) }
+
+        // The Mac offers a composer for a withdrawn conversation only when it sees this.
+        assertTrue(Proto.OFFLINE_REPLY_CAPABILITY in advertised)
+        assertTrue(Proto.IMAGE_CLIPBOARD_CAPABILITY in advertised)
+    }
 }

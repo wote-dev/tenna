@@ -209,6 +209,33 @@ path — no `ANSWER_PHONE_CALLS`, no `InCallService`, no default-dialer role.
 On the Mac, render a call as a distinct card and an in-window banner rather than a chat row, and
 clear it on `notif.removed`. This alone delivers "take calls" as LinkMyMac defines it.
 
+### Stage 3 — SMS: real threads, real sending — **DONE (2026-08-19)**
+
+Built and verified on SM-S942B: 63 conversations mirrored with contact names, history
+paged in on open, texts sent from the Mac reaching `Delivered`, and the messaging app's
+notifications suppressed (`com.google.android.apps.messaging`) so nothing shows twice.
+
+What landed differs from the plan below in three places, all deliberate:
+- Threads are built from a single newest-first pass over `Telephony.Sms` rather than from
+  `Telephony.Threads`, which is not reliably queryable across OEM builds — Samsung's in
+  particular.
+- `sms.messages` carries a `complete` flag so the Mac knows when it has reached the start
+  of a conversation and can stop paging.
+- `shouldMirror` was extracted whole into a pure `MirrorDecision`, which is what makes the
+  default-SMS suppression testable (`MirrorDecisionTest`).
+
+Also landed alongside it, not in the original plan:
+- **Reply to a notification the phone no longer shows** — capability
+  `notif.reply.offline.v1`. Messaging apps withdraw their notification the moment the chat
+  is read on the phone, and the listener used to drop the action list in
+  `onNotificationRemoved`, which made almost every WhatsApp/Signal thread unreplyable. An
+  Android reply `PendingIntent` outlives its notification, so `RetainedActions` keeps it.
+  `notif.reply.keys` tells the Mac which conversations the phone can still reply to, so the
+  window never offers a composer that would fail; `notif.reply.result` reports failures that
+  were previously silent.
+
+*Original plan follows, kept for the record.*
+
 ### Stage 3 — SMS: real threads, real sending
 
 **Decision taken: full SMS client** — read real thread history and send to any number, which is

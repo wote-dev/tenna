@@ -57,3 +57,33 @@ func withTemporaryArchive(_ body: (ConversationArchive) -> Void) {
     defer { try? FileManager.default.removeItem(at: dir) }
     body(ConversationArchive(directory: dir))
 }
+
+func makeSms(
+    id: Int64 = 1,
+    threadId: Int64 = 42,
+    address: String = "+61401660454",
+    displayName: String? = "Sam",
+    body: String = "are you close?",
+    whenMs: Int64 = 1_700_000_000_000,
+    outgoing: Bool = false,
+    read: Bool = false
+) -> SmsMessage {
+    SmsMessage(
+        id: id, threadId: threadId, address: address, displayName: displayName,
+        body: body, when: whenMs, outgoing: outgoing, read: read
+    )
+}
+
+func makeSmsThread(
+    id: Int64 = 42,
+    address: String = "+61401660454",
+    displayName: String = "Sam",
+    snippet: String = "are you close?",
+    whenMs: Int64 = 1_700_000_000_000,
+    unread: Int = 0
+) -> SmsThreadSummary {
+    SmsThreadSummary(
+        id: id, address: address, displayName: displayName,
+        snippet: snippet, when: whenMs, unread: unread
+    )
+}

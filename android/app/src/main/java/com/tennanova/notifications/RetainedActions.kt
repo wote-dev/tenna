@@ -38,6 +38,16 @@ class RetainedActions<T>(private val limit: Int = DEFAULT_LIMIT) {
 
     fun get(key: String): T? = entries[key]
 
+    /**
+     * The keys whose payload still satisfies [predicate] — used to tell the Mac which
+     * conversations it may actually offer a composer for.
+     *
+     * Iteration deliberately does not count as use: asking what is here must not reorder
+     * what gets evicted.
+     */
+    fun keysWhere(predicate: (T) -> Boolean): Set<String> =
+        entries.entries.filter { predicate(it.value) }.map { it.key }.toSet()
+
     /** For a key that will never be replied to again — a different phone, or an unpair. */
     fun forget(key: String) {
         entries.remove(key)

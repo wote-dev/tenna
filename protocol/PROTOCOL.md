@@ -172,8 +172,13 @@ rather than the whole truth.
 // Android -> Mac, notification gone from the phone
 {"v":1,"type":"notif.removed","key":"…"}
 
-// Mac -> Android, user typed a reply into Notification Center
-{"v":1,"type":"notif.reply","key":"…","actionId":0,"text":"on my way"}
+// Mac -> Android, user typed a reply into Notification Center or the window
+{"v":1,"type":"notif.reply","key":"…","actionId":0,"text":"on my way",
+ "clientId":"9F3B…"}                       // optional; echoed back in notif.reply.result
+
+// Android -> Mac, what became of that reply. Requires notif.reply.offline.v1.
+{"v":1,"type":"notif.reply.result","clientId":"9F3B…","key":"…","actionId":0,
+ "ok":false,"error":"The app withdrew this conversation's reply."}
 
 // Mac -> Android, user clicked a non-reply action button
 {"v":1,"type":"notif.action","key":"…","actionId":1}
@@ -181,6 +186,71 @@ rather than the whole truth.
 // Mac -> Android, user dismissed it on the Mac
 {"v":1,"type":"notif.dismiss","key":"…"}
 ```
+
+**Replying to a notification the phone no longer shows** — capability
+`notif.reply.offline.v1`. Messaging apps withdraw their notification the moment the chat
+is read on the phone, so by the time anyone looks at the Mac window nearly every
+conversation has already been `notif.removed`. That does *not* mean the reply is gone: an
+Android reply `PendingIntent` is not invalidated when its notification is cancelled, and
+stays live until the posting app cancels the intent itself. A phone advertising this
+capability therefore keeps each key's action list after removal (bounded, least-recently
+used evicted first) instead of dropping it, and answers every `notif.reply` with a
+`notif.reply.result`.
+
+The Mac must not offer a composer for a removed conversation against a phone *without* the
+capability — an older build has already thrown the actions away and would drop the reply in
+silence. `ok:true` means the phone fired the intent, which is not proof the app accepted
+it; only the phone mirroring the message back confirms that.
+
+## SMS — capability `sms.v1`
+
+The one messaging surface Android actually opens to a third-party app. WhatsApp, Signal and
+the rest expose nothing but their notifications — no history, no way to start a
+conversation — so a Mac-side chat for those can only ever be notification-shaped. The SMS
+provider has no such limit: full thread history, and `SmsManager` sends to any number
+*without* the app being the default SMS app. Only writing to the provider and MMS need that
+role, and neither is done. **Text SMS only**; MMS is out of scope rather than half-supported.
+
+Advertised only while the user has switched SMS on **and** granted `READ_SMS`/`SEND_SMS`, so
+the Mac can tell "this build cannot" from "this phone has not been asked yet".
+
+```jsonc
+// Android -> Mac, the conversation list, after hello.ack
+{"v":1,"type":"sms.threads","threads":[
+  {"id":42,"address":"+61401660454","displayName":"Sam",
+   "snippet":"see you at 8","when":1723900000000,"unread":3}]}
+
+// Mac -> Android, open a conversation (beforeId pages further back)
+{"v":1,"type":"sms.thread.request","threadId":42,"beforeId":991,"limit":100}
+
+// Android -> Mac, one page, oldest first. complete=false means more history remains.
+{"v":1,"type":"sms.messages","threadId":42,"complete":true,"messages":[
+  {"id":992,"threadId":42,"address":"+61401660454","displayName":"Sam",
+   "body":"are you close?","when":1723900000000,"outgoing":false,"read":true}]}
+
+// Android -> Mac, one new message, pushed live by a ContentObserver
+{"v":1,"type":"sms.received","message":{…}}
+
+// Mac -> Android, send
+{"v":1,"type":"sms.send","address":"+61401660454","body":"five minutes","clientId":"9F3B…"}
+
+// Android -> Mac, what the radio said
+{"v":1,"type":"sms.send.result","clientId":"9F3B…","ok":false,"error":"The phone's radio is off."}
+```
+
+`displayName` is resolved **on the phone**, which already holds `READ_CONTACTS` for it.
+That is why there is no contacts protocol here and no contact cache on the Mac.
+
+`outgoing` means "the user sent this", not "this device sent it": a text typed on the phone
+and one typed on the Mac read identically in a transcript.
+
+**Duplicate suppression, and the detail that would otherwise ruin this.** Every incoming
+text raises both a provider row *and* a notification. While `sms.v1` is active the phone
+must also drop notifications from `Telephony.Sms.getDefaultSmsPackage(context)` — the SMS
+channel owns those conversations, and mirroring both shows every message twice.
+
+Unlike `notif.reply`, an SMS really can reach `confirmed`: the provider row the phone writes
+comes back as `sms.received` and reconciles the optimistic bubble by body and time.
 
 **Android sending rules** — these exist to stop duplicates and noise:
 - Skip `FLAG_GROUP_SUMMARY` (the single biggest source of duplicate notifications).

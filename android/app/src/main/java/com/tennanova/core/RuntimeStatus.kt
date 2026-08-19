@@ -30,6 +30,20 @@ enum class ConnectionStatus {
         get() = this == CONNECTED || this == AUTH_FAILED || this == PIN_MISMATCH
 }
 
+/**
+ * How far SMS mirroring has got, in the same shape as `ClipboardAccessStatus`.
+ *
+ * `OFF` and `NEEDS_PERMISSION` are deliberately distinct: one is a choice and the other is
+ * an unfinished setup, and a dashboard that conflates them tells the user to fix something
+ * they switched off on purpose.
+ */
+enum class SmsAccessStatus {
+    OFF,
+    NEEDS_PERMISSION,
+    READY,
+    ERROR
+}
+
 data class RuntimeSnapshot(
     val connection: ConnectionStatus = ConnectionStatus.UNPAIRED,
     val transport: ConnectionTransport = ConnectionTransport.NONE,
@@ -37,6 +51,8 @@ data class RuntimeSnapshot(
     val pairingConfirmed: Boolean = false,
     val macName: String? = null,
     val clipboard: ClipboardAccessStatus = ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
+    val sms: SmsAccessStatus = SmsAccessStatus.OFF,
+    val smsThreadCount: Int = 0,
     val peerSupportsImages: Boolean = false,
     val lastTransfer: String? = null,
     val connectionError: String? = null,
@@ -69,6 +85,12 @@ object RuntimeStatusStore {
 
     fun updateConnectionService(running: Boolean) {
         mutable.update { it.copy(connectionServiceRunning = running) }
+    }
+
+    fun updateSms(status: SmsAccessStatus, threadCount: Int? = null) {
+        mutable.update {
+            it.copy(sms = status, smsThreadCount = threadCount ?: it.smsThreadCount)
+        }
     }
 
     fun updateConnection(status: ConnectionStatus, error: String? = null) {

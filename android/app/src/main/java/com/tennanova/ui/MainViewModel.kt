@@ -11,6 +11,8 @@ import com.tennanova.core.ConnectionStatus
 import com.tennanova.core.PairingPayload
 import com.tennanova.core.RuntimeStatusStore
 import com.tennanova.core.Settings
+import com.tennanova.core.SmsAccessStatus
+import com.tennanova.sms.SmsMirror
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -30,6 +32,8 @@ data class MainUiState(
     val accessibilityEnabled: Boolean = false,
     val connection: ConnectionStatus = ConnectionStatus.UNPAIRED,
     val clipboard: ClipboardAccessStatus = ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
+    val sms: SmsAccessStatus = SmsAccessStatus.OFF,
+    val smsThreadCount: Int = 0,
     val peerSupportsImages: Boolean = false,
     val lastTransfer: String? = null,
     val message: String? = null,
@@ -98,6 +102,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             },
             clipboard = if (accessibility) runtime.clipboard
                 else ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
+            // No extra flow: the SMS state already travels in the runtime snapshot, kept
+            // current by `refreshAccessState`. `combine` is at its five-argument overload
+            // here and adding a sixth would force the vararg form for no gain.
+            sms = runtime.sms,
+            smsThreadCount = runtime.smsThreadCount,
             peerSupportsImages = runtime.peerSupportsImages,
             lastTransfer = runtime.lastTransfer,
             message = localMessage
@@ -120,11 +129,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             ComponentName.unflattenFromString(it) == expected
         }
         accessibilityEnabled.value = TennaAccessibilityService.isEnabled(context)
+        RuntimeStatusStore.updateSms(
+            when {
+                !settings.smsEnabled -> SmsAccessStatus.OFF
+                !smsPermissionsGranted() -> SmsAccessStatus.NEEDS_PERMISSION
+                else -> SmsAccessStatus.READY
+            }
+        )
         if (!accessibilityEnabled.value) {
             RuntimeStatusStore.updateClipboard(ClipboardAccessStatus.NEEDS_ACCESSIBILITY)
         } else if (RuntimeStatusStore.state.value.clipboard != ClipboardAccessStatus.ERROR) {
             RuntimeStatusStore.updateClipboard(ClipboardAccessStatus.READY)
         }
+    }
+
+    /**
+     * SMS is a toggle, never an onboarding step. The app has to stay wholly useful to
+     * someone who never turns it on, so nothing here blocks or nags.
+     */
+    fun setSmsEnabled(enabled: Boolean) {
+        settings.smsEnabled = enabled
+        refreshAccessState()
+        if (enabled && smsPermissionsGranted()) {
+            show(Banner("SMS mirroring on. Your Mac will show your texts.", transient = true))
+        } else if (!enabled) {
+            show(Banner("SMS mirroring off.", transient = true))
+        }
+        // The listener holds the socket and does the mirroring, and it only learns about
+        // this when it next says hello.
+        RuntimeStatusStore.pairingChanged()
+    }
+
+    fun smsEnabled(): Boolean = settings.smsEnabled
+
+    fun smsPermissionsGranted(): Boolean {
+        val mirror = SmsMirror(getApplication())
+        return mirror.hasReadAccess() && mirror.hasSendAccess()
     }
 
     fun hasNotificationAccess(): Boolean {

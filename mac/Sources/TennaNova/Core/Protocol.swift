@@ -15,6 +15,14 @@ enum Proto {
     /// apps withdraw their notification the moment the chat is read on the phone, so that
     /// refusal is the normal case, not the edge one.
     static let offlineReplyCapability = "notif.reply.offline.v1"
+
+    /// The phone mirrors its real SMS store — whole threads with history, live arrivals,
+    /// and sending to any number, none of it dependent on a notification.
+    ///
+    /// This is the one messaging surface Android actually opens to a third-party app.
+    /// WhatsApp, Signal and the rest expose nothing but their notifications, so those can
+    /// only ever be replied to; SMS can be a real client.
+    static let smsCapability = "sms.v1"
     static let maxImageBytes = 25 * 1024 * 1024
 
     static func isLowercaseSHA256(_ value: String) -> Bool {
@@ -170,6 +178,17 @@ struct NotifReply: Codable {
     var clientId: String?
 }
 
+/// Every notification key the phone still holds a reply action for.
+///
+/// Sent after the reconnect replay. The Mac's own history is not evidence: it remembers
+/// that a conversation once offered a reply, but the intent lives only in the phone's
+/// listener process, and a chat cleared before that process last started is gone.
+struct NotifReplyKeys: Codable {
+    var v = Proto.version
+    var type = "notif.reply.keys"
+    var keys: [String]
+}
+
 /// What the phone did with a `notif.reply`.
 ///
 /// The only thing that ever told the Mac a reply had failed was the socket being down.
@@ -196,6 +215,108 @@ struct NotifDismiss: Codable {
     var v = Proto.version
     var type = "notif.dismiss"
     var key: String
+}
+
+// MARK: - SMS
+
+/// One conversation in the phone's SMS store.
+///
+/// `displayName` is resolved on the phone, which already holds `READ_CONTACTS`. That is
+/// why there is no contacts protocol here and no contact cache on the Mac.
+struct SmsThreadSummary: Codable, Equatable {
+    var id: Int64
+    var address: String
+    var displayName: String
+    var snippet: String
+    var when: Int64
+    var unread: Int
+}
+
+/// Whether two phone numbers are the same person.
+///
+/// Mirrors `SmsAddresses.normalize` on the phone and must keep agreeing with it: both
+/// sides keep the last nine digits, because country code and trunk prefix are exactly the
+/// parts that differ between spellings of one number and the subscriber part is the part
+/// that does not. Short codes and alphanumeric sender ids are left whole — a five-digit
+/// sender has no prefix to strip, and truncating one would merge unrelated services.
+enum SmsAddressMatch {
+    static let significantDigits = 9
+
+    static func normalize(_ raw: String) -> String {
+        let digits = raw.filter(\.isNumber)
+        guard !digits.isEmpty else {
+            return raw.trimmingCharacters(in: .whitespaces).lowercased()
+        }
+        guard digits.count > significantDigits else { return digits }
+        return String(digits.suffix(significantDigits))
+    }
+
+    static func same(_ a: String, _ b: String) -> Bool {
+        normalize(a) == normalize(b)
+    }
+}
+
+struct SmsThreads: Codable {
+    var v = Proto.version
+    var type = "sms.threads"
+    var threads: [SmsThreadSummary]
+}
+
+/// One text.
+///
+/// `outgoing` means "the user sent this", not "this device sent it" — a message typed on
+/// the phone and one typed on the Mac read identically in a transcript.
+struct SmsMessage: Codable, Equatable {
+    var id: Int64
+    var threadId: Int64
+    var address: String
+    var displayName: String?
+    var body: String
+    var when: Int64
+    var outgoing: Bool
+    var read: Bool
+
+    var date: Date { Date(timeIntervalSince1970: Double(when) / 1000) }
+}
+
+struct SmsMessages: Codable {
+    var v = Proto.version
+    var type = "sms.messages"
+    var threadId: Int64
+    var messages: [SmsMessage]
+    /// False while older messages remain, so the Mac knows it may page further back.
+    var complete: Bool
+}
+
+struct SmsReceived: Codable {
+    var v = Proto.version
+    var type = "sms.received"
+    var message: SmsMessage
+}
+
+struct SmsThreadRequest: Codable {
+    var v = Proto.version
+    var type = "sms.thread.request"
+    var threadId: Int64
+    var beforeId: Int64?
+    var limit: Int
+}
+
+struct SmsSend: Codable {
+    var v = Proto.version
+    var type = "sms.send"
+    var address: String
+    var body: String
+    var clientId: String
+}
+
+struct SmsSendResult: Codable {
+    var v = Proto.version
+    var type = "sms.send.result"
+    var clientId: String
+    var ok: Bool
+    var threadId: Int64?
+    var error: String?
 }
 
 // MARK: - Icons

@@ -132,6 +132,28 @@ final class NotificationStore {
         log.replyTarget(for: key, allowingWithdrawn: allowingWithdrawn)
     }
 
+    // MARK: - SMS
+
+    nonisolated func applySmsThreads(_ summaries: [SmsThreadSummary]) {
+        onMain { self.mutate { $0.applySmsThreads(summaries) } }
+    }
+
+    nonisolated func applySmsMessages(threadId: Int64, messages: [SmsMessage]) {
+        onMain { self.mutate { $0.applySmsMessages(threadId: threadId, messages: messages) } }
+    }
+
+    nonisolated func ingest(_ message: SmsMessage) {
+        onMain { self.mutate { $0.ingest(message) } }
+    }
+
+    func draftSmsThread(address: String, title: String) -> ConversationKey {
+        mutating { $0.draftSmsThread(address: address, title: title) }
+    }
+
+    nonisolated func applyReplyableKeys(_ keys: Set<String>) {
+        onMain { self.mutate { $0.applyReplyableKeys(keys) } }
+    }
+
     nonisolated func applyReplyResult(_ id: UUID, ok: Bool, error: String?) {
         onMain { self.mutate { $0.applyReplyResult(id, ok: ok, error: error) } }
     }

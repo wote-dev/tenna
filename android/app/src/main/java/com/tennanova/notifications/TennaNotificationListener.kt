@@ -17,6 +17,12 @@ import android.service.notification.StatusBarNotification
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.RemoteInput
+import com.tennanova.core.SmsAccessStatus
+import com.tennanova.core.SmsMessageWire
+import com.tennanova.core.SmsThreadWire
+import com.tennanova.sms.SmsMessage
+import com.tennanova.sms.SmsMirror
+import com.tennanova.sms.SmsThreadSummary
 import com.tennanova.core.Messages
 import com.tennanova.core.NotifAction
 import com.tennanova.core.ClipImageHeader
@@ -67,6 +73,11 @@ class TennaNotificationListener : NotificationListenerService() {
 
     /** Reply/action plumbing for notifications currently on screen, keyed by SBN key. */
     private val actionMap = RetainedActions<List<Notification.Action>>()
+    private val sms by lazy { SmsMirror(this) }
+    /** Resolved once: it cannot change without the user changing a system setting. */
+    private val defaultSmsPackage: String? by lazy {
+        runCatching { android.provider.Telephony.Sms.getDefaultSmsPackage(this) }.getOrNull()
+    }
 
     /**
      * Content-addressed PNGs the Mac can ask for by hash — app icons and contact photos
@@ -157,6 +168,7 @@ class TennaNotificationListener : NotificationListenerService() {
 
     override fun onDestroy() {
         RuntimeStatusStore.updateConnectionService(false)
+        sms.stop()
         socket?.stop()
         relay.stop()
         discovery.stop()
@@ -329,7 +341,9 @@ class TennaNotificationListener : NotificationListenerService() {
                 sdk = android.os.Build.VERSION.SDK_INT,
                 battery = battery,
                 pairingToken = settings.pairingToken,
-                deviceToken = settings.deviceToken
+                deviceToken = settings.deviceToken,
+                extraCapabilities = if (smsAvailable()) listOf(Proto.SMS_CAPABILITY)
+                                    else emptyList()
             )
         )
     }
@@ -359,6 +373,12 @@ class TennaNotificationListener : NotificationListenerService() {
                 RuntimeStatusStore.updateConnection(ConnectionStatus.CONNECTED)
                 // Populate the Mac and rebuild action mappings only after authentication.
                 activeNotifications?.forEach { handlePosted(it, resync = true) }
+                startSmsMirror()
+                // After the replay, and not before: the replay is what repopulates the
+                // action map for everything still on the phone's shade. Anything the user
+                // cleared before this service last started is genuinely unreplyable, and
+                // the Mac has to be told rather than left to guess from its own history.
+                sendReplyableKeys()
             }
 
             "hello.nack" -> {
@@ -391,6 +411,21 @@ class TennaNotificationListener : NotificationListenerService() {
                 // Absent from older Mac builds; then the result simply goes unclaimed.
                 val clientId = msg.optString("clientId").ifEmpty { null }
                 sendReply(key, actionId, text, clientId)
+            }
+
+            "sms.thread.request" -> {
+                val threadId = msg.optLong("threadId")
+                val beforeId = if (msg.has("beforeId")) msg.optLong("beforeId") else null
+                val limit = msg.optInt("limit", 100)
+                sendSmsThread(threadId, beforeId, limit)
+            }
+
+            "sms.send" -> {
+                sendSms(
+                    address = msg.optString("address"),
+                    body = msg.optString("body"),
+                    clientId = msg.optString("clientId")
+                )
             }
 
             "notif.action" -> {
@@ -535,17 +570,18 @@ class TennaNotificationListener : NotificationListenerService() {
      */
     private fun shouldMirror(sbn: StatusBarNotification): Boolean {
         val n = sbn.notification
-        if (sbn.packageName == packageName) return false
-        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return false
-        if (n.flags and Notification.FLAG_ONGOING_EVENT != 0) return false
-        if (n.flags and Notification.FLAG_FOREGROUND_SERVICE != 0) return false
-        if (sbn.packageName in settings.mutedPackages) return false
-
         val extras = n.extras
-        val hasText = extras.getCharSequence(Notification.EXTRA_TEXT) != null ||
+        return MirrorDecision.shouldMirror(
+            packageName = sbn.packageName,
+            ownPackage = packageName,
+            flags = n.flags,
+            hasText = extras.getCharSequence(Notification.EXTRA_TEXT) != null ||
                 extras.getCharSequence(Notification.EXTRA_BIG_TEXT) != null ||
-                extras.getCharSequence(Notification.EXTRA_TITLE) != null
-        return hasText
+                extras.getCharSequence(Notification.EXTRA_TITLE) != null,
+            mutedPackages = settings.mutedPackages,
+            smsActive = smsAvailable(),
+            defaultSmsPackage = defaultSmsPackage
+        )
     }
 
     // MARK: - Replies
@@ -590,6 +626,81 @@ class TennaNotificationListener : NotificationListenerService() {
             replyResult(clientId, key, actionId, false,
                 "The app withdrew this conversation's reply.")
         }
+    }
+
+    // MARK: - SMS
+
+    /** Switched on by the user *and* actually permitted. Both, or the Mac is not told. */
+    private fun smsAvailable(): Boolean = settings.smsEnabled && sms.hasReadAccess()
+
+    private fun startSmsMirror() {
+        if (!settings.smsEnabled) {
+            RuntimeStatusStore.updateSms(SmsAccessStatus.OFF, 0)
+            return
+        }
+        if (!sms.hasReadAccess()) {
+            RuntimeStatusStore.updateSms(SmsAccessStatus.NEEDS_PERMISSION, 0)
+            return
+        }
+        val threads = sms.threads()
+        RuntimeStatusStore.updateSms(SmsAccessStatus.READY, threads.size)
+        Log.i(TAG, "mirroring ${threads.size} SMS conversation(s); " +
+            "suppressing notifications from ${defaultSmsPackage ?: "no default SMS app"}")
+        socket?.send(Messages.smsThreads(threads.map { it.toWire() }))
+        // Idempotent: the mirror ignores a second call while it is already watching, so a
+        // reconnect re-sends the thread list without stacking observers.
+        sms.observe { fresh ->
+            if (!authenticated) return@observe
+            fresh.forEach { socket?.send(Messages.smsReceived(it.toWire())) }
+        }
+    }
+
+    private fun sendSmsThread(threadId: Long, beforeId: Long?, limit: Int) {
+        if (!smsAvailable()) return
+        val capped = limit.coerceIn(1, 200)
+        val messages = sms.messages(threadId, beforeId, capped)
+        socket?.send(
+            Messages.smsMessages(
+                threadId,
+                messages.map { it.toWire() },
+                // Fewer than asked for means we reached the start of the conversation, so
+                // the Mac can stop asking for more.
+                complete = messages.size < capped
+            )
+        )
+    }
+
+    private fun sendSms(address: String, body: String, clientId: String) {
+        if (!settings.smsEnabled) {
+            socket?.send(Messages.smsSendResult(clientId, false,
+                "SMS is switched off in Tennanova on this phone.", null))
+            return
+        }
+        if (body.isBlank()) {
+            socket?.send(Messages.smsSendResult(clientId, false, "Nothing to send.", null))
+            return
+        }
+        sms.send(address, body) { ok, error ->
+            socket?.send(Messages.smsSendResult(clientId, ok, error, null))
+        }
+    }
+
+    private fun SmsThreadSummary.toWire() = SmsThreadWire(
+        id, address, displayName, snippet, whenMs, unread
+    )
+
+    private fun SmsMessage.toWire() = SmsMessageWire(
+        id, threadId, address, displayName, body, whenMs, outgoing, read
+    )
+
+    /** Tells the Mac which conversations it may offer a composer for. */
+    private fun sendReplyableKeys() {
+        if (!authenticated) return
+        val keys = actionMap.keysWhere { actions ->
+            actions.any { it.remoteInputs?.isNotEmpty() == true }
+        }
+        Log.i(TAG, "can reply to ${keys.size} conversation(s)")
+        socket?.send(Messages.notifReplyKeys(keys))
     }
 
     /** Tells the Mac what actually happened, so a reply cannot silently vanish. */

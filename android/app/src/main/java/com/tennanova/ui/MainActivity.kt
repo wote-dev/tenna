@@ -1,12 +1,15 @@
 package com.tennanova.ui
 
+import android.Manifest
 import android.content.Intent
 import android.content.ComponentName
+import android.net.Uri
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.provider.Settings as AndroidSettings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
@@ -40,6 +43,56 @@ class MainActivity : ComponentActivity() {
      */
     private var shareConsumed = false
 
+    /**
+     * The first runtime permission request in this app. Everything before it was a deep
+     * link to a Settings screen re-checked on resume, and the QR scanner was even chosen
+     * to avoid a CAMERA prompt — but SMS has no Settings-screen equivalent.
+     *
+     * A denial is not an error state: the toggle simply goes back off, because the user
+     * saying no to reading their texts is an answer, not a failure to configure something.
+     */
+    private val smsPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        val essential = granted[Manifest.permission.READ_SMS] == true &&
+            granted[Manifest.permission.SEND_SMS] == true
+        viewModel.setSmsEnabled(essential)
+        if (!essential) {
+            // "Don't ask again" makes the system dialog stop appearing, and a switch that
+            // does nothing when tapped is indistinguishable from a broken one.
+            if (!shouldShowRequestPermissionRationale(Manifest.permission.READ_SMS)) {
+                openAppSettings()
+            }
+        }
+    }
+
+    private fun setSmsEnabled(enabled: Boolean) {
+        if (!enabled) {
+            viewModel.setSmsEnabled(false)
+            return
+        }
+        if (viewModel.smsPermissionsGranted()) {
+            viewModel.setSmsEnabled(true)
+            return
+        }
+        smsPermissions.launch(
+            arrayOf(
+                Manifest.permission.READ_SMS,
+                Manifest.permission.SEND_SMS,
+                // Optional: without it the Mac shows numbers instead of names, which is
+                // worse but perfectly usable, so a denial here does not fail the toggle.
+                Manifest.permission.READ_CONTACTS
+            )
+        )
+    }
+
+    private fun openAppSettings() {
+        startActivity(
+            Intent(AndroidSettings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                .setData(Uri.fromParts("package", packageName, null))
+        )
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         onboardingStep = savedInstanceState?.getString(KEY_ONBOARDING_STEP)
@@ -66,6 +119,7 @@ class MainActivity : ComponentActivity() {
                         viewModel.pair(value).also { if (it) beginOnboarding() }
                     },
                     onUnpair = viewModel::unpair,
+                    onSetSmsEnabled = ::setSmsEnabled,
                 )
             }
         }

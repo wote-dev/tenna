@@ -23,8 +23,10 @@ import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.LinkOff
+import androidx.compose.material.icons.outlined.Message
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material3.Switch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
@@ -62,6 +64,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.tennanova.R
 import com.tennanova.clipboard.ClipboardAccessStatus
+import com.tennanova.core.SmsAccessStatus
 import com.tennanova.core.ConnectionStatus
 import com.tennanova.net.ConnectionTransport
 
@@ -73,7 +76,8 @@ internal fun DashboardScreen(
     onOpenAccessibility: () -> Unit,
     onScanQr: () -> Unit,
     onPair: (String) -> Boolean,
-    onUnpair: () -> Unit
+    onUnpair: () -> Unit,
+    onSetSmsEnabled: (Boolean) -> Unit
 ) {
     // Saveable, not merely remembered: a rotation or a fold recreates the Activity, and
     // losing a half-typed pairing code to one is exactly the kind of glitch this screen
@@ -128,6 +132,21 @@ internal fun DashboardScreen(
                         )
                     }
                 }
+            }
+
+            // Deliberately outside "Finish setup": SMS is a choice, not an unfinished
+            // step, and the app is complete without it.
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                SectionTitle("Messages")
+                val (smsStatus, smsDetail) = smsCopy(state)
+                FeatureToggleRow(
+                    icon = Icons.Outlined.Message,
+                    title = "Text messages",
+                    status = smsStatus,
+                    detail = smsDetail,
+                    checked = state.sms != SmsAccessStatus.OFF,
+                    onCheckedChange = onSetSmsEnabled
+                )
             }
 
             AnimatedVisibility(
@@ -422,6 +441,52 @@ private fun PrivacyNote() {
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
     }
+}
+
+/**
+ * A feature the user opts into, rather than a permission they must grant to finish setup.
+ * The switch, not an "Enable" button, is what says it can be turned back off.
+ */
+@Composable
+private fun FeatureToggleRow(
+    icon: ImageVector,
+    title: String,
+    status: String,
+    detail: String,
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit
+) {
+    val statusColor = if (status == "Needs attention") MaterialTheme.colorScheme.error
+        else MaterialTheme.colorScheme.onSurfaceVariant
+    ListItem(
+        headlineContent = { Text(title, fontWeight = FontWeight.Medium) },
+        overlineContent = { Text(status, color = statusColor) },
+        supportingContent = { Text(detail) },
+        leadingContent = { Icon(icon, contentDescription = null, tint = statusColor) },
+        trailingContent = {
+            Switch(checked = checked, onCheckedChange = onCheckedChange)
+        },
+        colors = ListItemDefaults.colors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerLow
+        ),
+        modifier = Modifier.clip(RoundedCornerShape(16.dp))
+    )
+}
+
+internal fun smsCopy(state: MainUiState): Pair<String, String> = when (state.sms) {
+    SmsAccessStatus.OFF -> "Off" to
+        "Turn this on to read and send your texts from your Mac. Real conversations with " +
+        "their history, not just notifications."
+    SmsAccessStatus.NEEDS_PERMISSION -> "Needs access" to
+        "Allow Tennanova to read and send SMS, and to see your contacts so names travel " +
+        "with the numbers."
+    SmsAccessStatus.READY -> "On" to if (state.smsThreadCount > 0)
+        "${state.smsThreadCount} conversations are on your Mac. Text messages only — " +
+        "picture messages stay on the phone."
+    else "Your texts will appear on your Mac. Text messages only — picture messages " +
+        "stay on the phone."
+    SmsAccessStatus.ERROR -> "Needs attention" to
+        "Tennanova could not read this phone's messages. Check its permissions in Settings."
 }
 
 internal fun clipboardCopy(state: MainUiState): Pair<String, String> = when (state.clipboard) {

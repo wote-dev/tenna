@@ -144,6 +144,101 @@ struct ConversationLogTests {
         #expect(log.replyTarget(for: ConversationKey(notification)) == nil)
     }
 
+    // MARK: - Replying to a withdrawn notification
+
+    @Test func aWithdrawnConversationIsStillAddressableWhenThePhoneAllowsIt() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        log.markRemovedOnPhone(key: "k1")
+
+        // Messaging apps withdraw their notification the moment the chat is read on the
+        // phone, so refusing here is refusing almost every real conversation. The reply
+        // PendingIntent outlives the notification that carried it.
+        #expect(log.replyTarget(for: key) == nil)
+        #expect(log.replyTarget(for: key, allowingWithdrawn: true)
+                == ReplyTarget(key: "k1", actionId: 0))
+    }
+
+    @Test func aWithdrawnConversationThePhoneNoLongerHoldsIsRefused() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        log.markRemovedOnPhone(key: "k1")
+
+        // Restarting the Android app loses the reply intent for anything already cleared.
+        // Our own history still remembers the action, which is exactly why it is not
+        // evidence — believing it promised replies that came back as failures.
+        log.applyReplyableKeys([])
+        #expect(log.replyTarget(for: key, allowingWithdrawn: true) == nil)
+
+        // And the phone saying it holds one is what makes it addressable again.
+        log.applyReplyableKeys(["k1"])
+        #expect(log.replyTarget(for: key, allowingWithdrawn: true)
+                == ReplyTarget(key: "k1", actionId: 0))
+    }
+
+    @Test func aLiveConversationDoesNotWaitForThePhonesReplyableList() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+
+        // The list arrives once per reconnect; a notification posted since then is
+        // self-evidently one the phone just captured.
+        log.applyReplyableKeys([])
+        #expect(log.replyTarget(for: key) == ReplyTarget(key: "k1", actionId: 0))
+    }
+
+    @Test func aRestoredHistoryClaimsNothingAboutWhatThePhoneHolds() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        #expect(log.replyableKeys == ["k1"])
+
+        log.normalizeAfterRestore()
+
+        // Nothing on disk can speak for a phone process that has not connected yet.
+        #expect(log.replyableKeys.isEmpty)
+    }
+
+    @Test func aConversationWithNoReplyActionStaysUnaddressableEitherWay() {
+        var log = ConversationLog()
+        let key = ConversationKey.app(pkg: "com.google.android.gm")
+        log.ingest(makeNotification(
+            pkg: "com.google.android.gm", title: "Receipt", category: "status",
+            actions: [NotifAction(id: 0, label: "Delete", isReply: false)]
+        ))
+
+        // `allowingWithdrawn` relaxes *which notification* may be addressed, never
+        // whether one that never offered a reply suddenly does.
+        #expect(log.replyTarget(for: key, allowingWithdrawn: true) == nil)
+    }
+
+    @Test func aReplyThePhoneCouldNotSendIsReportedAsFailed() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        let id = log.appendOutgoing("five minutes", to: key)!
+
+        log.applyReplyResult(id, ok: false, error: "The app withdrew this conversation's reply.")
+
+        #expect(log[key]?.messages.last?.delivery
+                == .failed("The app withdrew this conversation's reply."))
+    }
+
+    @Test func aReplyThePhoneSentIsNotYetConfirmed() {
+        var log = ConversationLog()
+        let key = ConversationKey.conversation(pkg: "com.whatsapp", title: "Sam")
+        log.ingest(makeNotification(title: "Sam", senderName: "Sam"))
+        let id = log.appendOutgoing("five minutes", to: key)!
+        log.markDelivery(id, .sent)
+
+        log.applyReplyResult(id, ok: true, error: nil)
+
+        // Firing the intent is not the app accepting it. Only the phone mirroring the
+        // message back earns `.confirmed`.
+        #expect(log[key]?.messages.last?.delivery == .sent)
+    }
+
     // MARK: - Optimistic echo
 
     @Test func ourOwnReplyComingBackReconcilesIntoOneBubble() {
@@ -396,3 +491,143 @@ struct ConversationArchiveTests {
         }
     }
 }
+
+/// SMS reuses the notification reducer rather than standing up a second store, so these
+/// cover the parts where a text is genuinely not a notification.
+struct SmsConversationTests {
+
+    private let key = ConversationKey.sms(threadId: 42)
+
+    @Test func textsAndChatsShareOneInbox() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(title: "Sam", whenMs: 1_700_000_000_000, senderName: "Sam"))
+        log.ingest(makeSms(whenMs: 1_700_000_100_000))
+
+        // One sidebar, ordered by recency, with the whole tested reducer applying to both.
+        #expect(log.threads.count == 2)
+        #expect(log.threadsByRecency.first?.id == key)
+    }
+
+    @Test func aThreadSummaryFillsTheSidebarBeforeItsHistoryArrives() {
+        var log = ConversationLog()
+        log.applySmsThreads([makeSmsThread(snippet: "see you at 8", unread: 3)])
+
+        let thread = log[key]
+        #expect(thread?.title == "Sam")
+        #expect(thread?.smsAddress == "+61401660454")
+        #expect(thread?.unreadCount == 3)
+        // A summary carries a snippet, not a transcript.
+        #expect(thread?.messages.isEmpty == true)
+        #expect(thread?.preview == "see you at 8")
+    }
+
+    @Test func historyDoesNotDuplicateWhenAThreadIsOpenedTwice() {
+        var log = ConversationLog()
+        let page = [makeSms(id: 1, body: "one"), makeSms(id: 2, body: "two")]
+        log.applySmsMessages(threadId: 42, messages: page)
+        log.applySmsMessages(threadId: 42, messages: page)
+
+        #expect(log[key]?.messages.map(\.body) == ["one", "two"])
+    }
+
+    @Test func aTextSentFromTheMacIsConfirmedByTheRowThePhoneWrites() {
+        var log = ConversationLog()
+        log.applySmsThreads([makeSmsThread()])
+        let id = log.appendOutgoing("five minutes", to: key)!
+        log.markDelivery(id, .sent)
+
+        // Unlike a notification reply, SMS really can be confirmed: the provider row comes
+        // back through `sms.received` and is the same message.
+        log.ingest(makeSms(id: 99, body: "five minutes", outgoing: true))
+
+        let messages = log[key]?.messages ?? []
+        #expect(messages.count == 1)
+        #expect(messages.first?.delivery == .confirmed)
+        #expect(messages.first?.id == id)
+    }
+
+    @Test func aTextSentOnThePhoneShowsAsOursWithoutAnEcho() {
+        var log = ConversationLog()
+        log.ingest(makeSms(id: 5, body: "on my way", outgoing: true))
+
+        let message = log[key]?.messages.first
+        #expect(message?.origin == .mac)
+        // Nothing optimistic to reconcile — this one was typed on the phone.
+        #expect(message?.delivery == .confirmed)
+    }
+
+    @Test func backfillAndLiveArrivalsEndUpInReadingOrder() {
+        var log = ConversationLog()
+        log.ingest(makeSms(id: 9, body: "newest", whenMs: 1_700_000_300_000))
+        log.applySmsMessages(threadId: 42, messages: [
+            makeSms(id: 7, body: "oldest", whenMs: 1_700_000_100_000),
+            makeSms(id: 8, body: "middle", whenMs: 1_700_000_200_000)
+        ])
+
+        // History pages arrive after the live message that prompted the thread to open.
+        #expect(log[key]?.messages.map(\.body) == ["oldest", "middle", "newest"])
+    }
+
+    @Test func anIncomingTextNamesTheSenderAndAnOutgoingOneDoesNot() {
+        var log = ConversationLog()
+        log.ingest(makeSms(id: 1, displayName: "Sam"))
+        log.ingest(makeSms(id: 2, displayName: "Me", body: "nearly", outgoing: true))
+
+        // An outgoing row's displayName is us, and must not rename the conversation.
+        #expect(log[key]?.title == "Sam")
+        #expect(log[key]?.messages.last?.senderName == nil)
+    }
+
+    @Test func alreadyReadTextsDoNotRaiseTheUnreadCount() {
+        var log = ConversationLog()
+        log.ingest(makeSms(id: 1, read: true))
+        log.ingest(makeSms(id: 2, body: "and another", read: false))
+
+        #expect(log[key]?.unreadCount == 1)
+    }
+
+    @Test func startingAConversationTwiceReusesTheSameThread() {
+        var log = ConversationLog()
+        let first = log.draftSmsThread(address: "+61 401 660 454", title: "+61 401 660 454")
+        // The same person, written the way a phone keypad produces it.
+        let second = log.draftSmsThread(address: "0401660454", title: "0401660454")
+
+        #expect(first == second)
+        #expect(log.threads.count == 1)
+    }
+
+    @Test func aDraftThreadCannotCollideWithARealOne() {
+        var log = ConversationLog()
+        log.applySmsThreads([makeSmsThread(id: 1)])
+        let draft = log.draftSmsThread(address: "+61400000000", title: "New")
+
+        // The phone assigns real ids; until it does, a negative one cannot be mistaken
+        // for a thread that already exists.
+        if case let .sms(threadId) = draft { #expect(threadId < 0) } else { Issue.record("not sms") }
+        #expect(log.threads.count == 2)
+    }
+}
+
+struct SmsAddressMatchTests {
+
+    @Test func oneNumberWrittenSeveralWaysIsOnePerson() {
+        // Must keep agreeing with `SmsAddresses.normalize` on the phone.
+        #expect(SmsAddressMatch.same("+61 401 660 454", "0401660454"))
+        #expect(SmsAddressMatch.same("+61401660454", "401660454"))
+    }
+
+    @Test func differentPeopleStayDifferent() {
+        #expect(!SmsAddressMatch.same("+61401660454", "+61401660455"))
+    }
+
+    @Test func shortCodesAreNotTruncatedIntoEachOther() {
+        #expect(!SmsAddressMatch.same("19876", "28876"))
+        #expect(SmsAddressMatch.normalize("19876") == "19876")
+    }
+
+    @Test func alphanumericSendersSurvive() {
+        #expect(SmsAddressMatch.normalize("amaysim") == "amaysim")
+        #expect(SmsAddressMatch.same("amaysim", "AMAYSIM"))
+    }
+}
+

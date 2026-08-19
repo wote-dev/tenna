@@ -154,6 +154,18 @@ class Settings(context: Context) {
     /** A scanned QR is pending until the Mac issues this phone a long-lived token. */
     val isPairingConfirmed: Boolean get() = !deviceToken.isNullOrBlank()
 
+    /**
+     * Whether the user has turned SMS mirroring on.
+     *
+     * Off by default and never part of onboarding: the app has to stay completely useful
+     * to someone who grants neither this nor call access. Separate from whether the
+     * permissions are granted — a user can revoke those in Settings without meaning to
+     * turn the feature off, and turning it back on should not have to be rediscovered.
+     */
+    var smsEnabled: Boolean
+        get() = prefs.getBoolean(KEY_SMS_ENABLED, false)
+        set(v) = prefs.edit().putBoolean(KEY_SMS_ENABLED, v).apply()
+
     /** Packages the user has muted. */
     var mutedPackages: Set<String>
         get() = prefs.getStringSet(KEY_MUTED, emptySet()) ?: emptySet()
@@ -212,5 +224,6 @@ class Settings(context: Context) {
         const val KEY_RELAY_HOST = "relayHost"
         const val KEY_RELAY_ROOM = "relayRoom"
         const val KEY_MUTED = "mutedPackages"
+        const val KEY_SMS_ENABLED = "smsEnabled"
     }
 }

@@ -4,6 +4,17 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- SMS mirroring. The first runtime permissions in this app: everything before them
+         was a deep link to a Settings screen. All three are optional and requested only
+         when the user turns SMS on, and the app stays fully useful without any of them.
+         READ_CONTACTS is what lets numbers reach the Mac already resolved to names, so
+         the Mac needs no contacts protocol of its own.
+         Play Store's SMS/Call-Log policy is not a constraint here: this app is sideloaded
+         and never published (see build.gradle.kts). -->
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.READ_CONTACTS" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />

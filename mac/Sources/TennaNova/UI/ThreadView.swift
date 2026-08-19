@@ -29,7 +29,12 @@ struct ThreadView: View {
                                        description: Text("This conversation is no longer in the history."))
             }
         }
-        .task { state.history.markRead(key) }
+        .task {
+            state.history.markRead(key)
+            // Summaries carry a snippet, not a transcript, so a thread opened for the
+            // first time has to ask for its history.
+            state.loadSmsThread(key)
+        }
         // Messages arriving while the thread is open are being read as they land, so the
         // badge must not start climbing behind the reader's back. Converges immediately —
         // `markRead` sets the count to zero and a zero count changes nothing.
@@ -46,7 +51,7 @@ struct ThreadView: View {
                    monogram: thread.title.monogram, size: 34)
             VStack(alignment: .leading, spacing: 1) {
                 Text(thread.title).font(.headline)
-                Text(Tenna.appName(thread.pkg, fallback: thread.appLabel))
+                Text(headerSubtitle(thread))
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -57,16 +62,41 @@ struct ThreadView: View {
         .padding(.vertical, 10)
     }
 
+    /// SMS threads say the number, which is the useful thing when a contact has several
+    /// or when there is no contact at all. Everything else says which app it came from.
+    private func headerSubtitle(_ thread: ConversationThread) -> String {
+        if key.isSms {
+            guard let address = thread.smsAddress else { return "Text message" }
+            return address == thread.title ? "Text message" : address
+        }
+        return Tenna.appName(thread.pkg, fallback: thread.appLabel)
+    }
+
     /// The notification's own non-reply buttons — "Mark as read", "Archive". They are
     /// positional indices into the latest post, which is why they come from the thread
     /// rather than from any message.
     @ViewBuilder
     private func actionButtons(_ thread: ConversationThread) -> some View {
-        if thread.isLiveOnPhone {
+        // An SMS thread has no notification behind it, so none of this applies to one.
+        if key.isSms {
+            EmptyView()
+        } else {
+            notificationActionButtons(thread)
+        }
+    }
+
+    @ViewBuilder
+    private func notificationActionButtons(_ thread: ConversationThread) -> some View {
+        // These fire the same retained PendingIntents the composer does, so they keep
+        // working after the notification is gone. Clearing one that is already gone does
+        // not, which is why the bell is the only thing still gated on it.
+        if thread.isLiveOnPhone || state.supportsOfflineReply {
             ForEach(thread.latestActions.filter { !$0.isReply }, id: \.id) { action in
                 Button(action.label) { state.invoke(action: action, in: key) }
                     .controlSize(.small)
             }
+        }
+        if thread.isLiveOnPhone {
             Button {
                 state.dismissOnPhone(key)
             } label: {
@@ -138,14 +168,37 @@ struct ThreadView: View {
     }
 
     /// Why the composer is missing, in the user's terms. Silence would read as a bug.
+    ///
+    /// Ordered from the most permanent reason to the most temporary, so the message names
+    /// the thing the user would actually have to change.
     private func unavailableReason(_ thread: ConversationThread) -> String? {
-        if !thread.isLiveOnPhone {
-            return "This notification has been cleared on the phone, so there is no longer "
-                 + "anything to reply through. The next message in this chat restores it."
+        if key.isSms {
+            guard state.supportsSms else {
+                return "Turn on Text messages in Tennanova on your phone to send from here."
+            }
+            guard thread.smsAddress != nil else {
+                return "This conversation has no number to reply to."
+            }
+            return state.status.isConnected
+                ? nil
+                : "Waiting for the phone — texts are sent by its radio."
         }
-        if state.history.replyTarget(for: key) == nil {
+        guard thread.latestActions.contains(where: { $0.isReply }) else {
             return "\(Tenna.appName(thread.pkg, fallback: thread.appLabel)) does not offer "
                  + "an inline reply on this notification."
+        }
+        if state.history.replyTarget(for: key,
+                                     allowingWithdrawn: state.supportsOfflineReply) == nil {
+            guard state.supportsOfflineReply else {
+                return "This notification has been cleared on the phone, and the Tennanova "
+                     + "build on it can only reply while a notification is still showing. "
+                     + "The next message in this chat restores it."
+            }
+            // The phone holds the reply intent in its listener process, so restarting the
+            // Android app loses every conversation the user had already cleared.
+            return "This chat was cleared on the phone before Tennanova last restarted "
+                 + "there, so the phone no longer holds a way to reply to it. The next "
+                 + "message in this chat restores it."
         }
         if !state.status.isConnected {
             return "Waiting for the phone — replies need a live connection."

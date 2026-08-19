@@ -57,6 +57,16 @@ final class AppState {
 
     var supportsImageClipboard: Bool { capabilities.contains(Proto.imageClipboardCapability) }
 
+    /// Whether this phone can still reply to a conversation it is no longer showing.
+    /// Almost every mirrored chat is in that state within moments of arriving, so this is
+    /// what decides whether the window's composer is offered at all.
+    var supportsOfflineReply: Bool { capabilities.contains(Proto.offlineReplyCapability) }
+
+    /// Whether this phone is mirroring its SMS store. False also means "switched off or
+    /// not permitted on the phone", which is why the window points at the phone's own
+    /// toggle rather than offering to fix anything itself.
+    var supportsSms: Bool { capabilities.contains(Proto.smsCapability) }
+
     /// Everything the phone has mirrored, grouped into conversations.
     let history = NotificationStore()
 
@@ -280,6 +290,50 @@ final class AppState {
                 pendingBinary = .icon(sessionID: session.id, hash: m.hash, bytes: m.bytes)
             }
 
+        case "sms.threads":
+            if let m = try? Wire.decode(SmsThreads.self, from: data) {
+                Log.info("phone mirrored \(m.threads.count) SMS conversation(s)")
+                history.applySmsThreads(m.threads)
+            }
+
+        case "sms.messages":
+            if let m = try? Wire.decode(SmsMessages.self, from: data) {
+                history.applySmsMessages(threadId: m.threadId, messages: m.messages)
+            }
+
+        case "sms.received":
+            if let m = try? Wire.decode(SmsReceived.self, from: data) {
+                history.ingest(m.message)
+            }
+
+        case "sms.send.result":
+            if let m = try? Wire.decode(SmsSendResult.self, from: data) {
+                if let error = m.error, !m.ok {
+                    Log.warn("phone could not send an SMS: \(error)")
+                }
+                if let id = UUID(uuidString: m.clientId) {
+                    history.applyReplyResult(id, ok: m.ok, error: m.error)
+                }
+            }
+
+        case "notif.reply.keys":
+            if let m = try? Wire.decode(NotifReplyKeys.self, from: data) {
+                Log.info("phone can reply to \(m.keys.count) conversation(s)")
+                history.applyReplyableKeys(Set(m.keys))
+            }
+
+        case "notif.reply.result":
+            if let m = try? Wire.decode(NotifReplyResult.self, from: data) {
+                if let error = m.error, !m.ok {
+                    Log.warn("phone refused reply on \(m.key): \(error)")
+                }
+                // No clientId means an older Mac sent the reply, which cannot happen here
+                // — but a malformed one must not take the message down with it.
+                if let raw = m.clientId, let id = UUID(uuidString: raw) {
+                    history.applyReplyResult(id, ok: m.ok, error: m.error)
+                }
+            }
+
         case "clip.update":
             if let m = try? Wire.decode(ClipUpdate.self, from: data) {
                 clipboard?.applyRemote(text: m.body, seq: m.seq)
@@ -408,23 +462,71 @@ final class AppState {
 
     /// Sends a reply into a conversation and echoes it into the transcript immediately.
     ///
-    /// `.sent` is set once the frame reaches the socket, which is all the protocol can tell
-    /// us — there is no ack for `notif.reply`, and the phone can still fail to fire the
-    /// intent. Only the phone mirroring the message back earns `.confirmed`.
+    /// `.sent` is set once the frame reaches the socket. A phone advertising
+    /// `notif.reply.offline.v1` then answers with `notif.reply.result`, which is the only
+    /// thing that can report a *failure* — before it, a reply the phone could not deliver
+    /// sat at "Sent" forever. Success still does not earn `.confirmed`: firing the intent
+    /// is not the app accepting it, and only the phone mirroring the message back is.
     @MainActor
     func reply(to conversation: ConversationKey, text: String) {
         let body = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !body.isEmpty, let target = history.replyTarget(for: conversation) else { return }
+        guard !body.isEmpty else { return }
+
+        // SMS goes out through the phone's radio, not through a notification's action.
+        if case .sms = conversation {
+            sendSms(body, to: conversation)
+            return
+        }
+
+        guard let target = history.replyTarget(for: conversation,
+                                               allowingWithdrawn: supportsOfflineReply)
+        else { return }
         guard let id = history.appendOutgoing(body, to: conversation) else { return }
 
         let queued = send(
-            NotifReply(key: target.key, actionId: target.actionId, text: body)
+            NotifReply(key: target.key, actionId: target.actionId, text: body,
+                       clientId: id.uuidString)
         ) { [weak self] in
             DispatchQueue.main.async {
                 MainActor.assumeIsolated { self?.history.markDelivery(id, .sent) }
             }
         }
         if !queued { history.markDelivery(id, .failed("Phone not connected")) }
+    }
+
+    /// Sends a text, and puts it in the transcript before the phone has confirmed it.
+    ///
+    /// `.confirmed` is genuinely earned here, unlike a notification reply: the provider
+    /// row the phone writes comes back through `sms.received` and reconciles the bubble.
+    @MainActor
+    private func sendSms(_ body: String, to conversation: ConversationKey) {
+        guard let address = history.log[conversation]?.smsAddress else { return }
+        guard let id = history.appendOutgoing(body, to: conversation) else { return }
+
+        let queued = send(
+            SmsSend(address: address, body: body, clientId: id.uuidString)
+        ) { [weak self] in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.history.markDelivery(id, .sent) }
+            }
+        }
+        if !queued { history.markDelivery(id, .failed("Phone not connected")) }
+    }
+
+    /// Asks the phone for a thread's history. Called when a conversation is opened, and
+    /// again with `beforeId` to page further back.
+    @MainActor
+    func loadSmsThread(_ conversation: ConversationKey, beforeId: Int64? = nil) {
+        guard case let .sms(threadId) = conversation, threadId > 0 else { return }
+        send(SmsThreadRequest(threadId: threadId, beforeId: beforeId, limit: 100))
+    }
+
+    /// Starts a conversation with a number that has none yet.
+    @MainActor
+    func startSmsConversation(address: String) -> ConversationKey? {
+        let trimmed = address.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard supportsSms, !trimmed.isEmpty else { return nil }
+        return history.draftSmsThread(address: trimmed, title: trimmed)
     }
 
     /// Presses one of the notification's own non-reply buttons — "Mark as read", "Archive".

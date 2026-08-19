@@ -5,6 +5,7 @@ import SwiftUI
 struct ConversationList: View {
     @Environment(AppState.self) private var state
     @Binding var selection: SidebarItem?
+    @State private var newMessage = false
 
     var body: some View {
         List(selection: $selection) {
@@ -31,10 +32,25 @@ struct ConversationList: View {
                     if state.history.totalUnread > 0 {
                         UnreadBadge(count: state.history.totalUnread)
                     }
+                    if state.supportsSms {
+                        Button {
+                            newMessage = true
+                        } label: {
+                            Image(systemName: "square.and.pencil")
+                        }
+                        .buttonStyle(.plain)
+                        .help("Text someone new")
+                    }
                 }
             }
         }
         .listStyle(.sidebar)
+        .sheet(isPresented: $newMessage) {
+            NewMessageSheet { address in
+                guard let key = state.startSmsConversation(address: address) else { return }
+                selection = .thread(key)
+            }
+        }
     }
 
     private var deviceRow: some View {
@@ -95,7 +111,9 @@ struct ConversationRow: View {
                     }
                 }
 
-                Text(Tenna.appName(thread.pkg, fallback: thread.appLabel))
+                Text(thread.id.isSms
+                     ? "Text message"
+                     : Tenna.appName(thread.pkg, fallback: thread.appLabel))
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
             }
@@ -115,5 +133,50 @@ struct UnreadBadge: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 1)
             .background(Tenna.accent, in: .capsule)
+    }
+}
+
+/// Starting a conversation with a number that has no thread yet — the thing a notification
+/// mirror fundamentally cannot do, and the reason the SMS channel exists.
+struct NewMessageSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let onStart: (String) -> Void
+
+    @State private var address = ""
+    @FocusState private var focused: Bool
+
+    private var canStart: Bool {
+        SmsAddressMatch.normalize(address).contains(where: \.isNumber)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("New text message").font(.headline)
+            Caption("Texts go out through your phone's radio. Picture messages are not "
+                    + "supported — those stay on the phone.")
+
+            TextField("Phone number", text: $address)
+                .textFieldStyle(.roundedBorder)
+                .focused($focused)
+                .onSubmit(start)
+
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Start", action: start)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(!canStart)
+            }
+        }
+        .padding(20)
+        .frame(width: 360)
+        .onAppear { focused = true }
+    }
+
+    private func start() {
+        guard canStart else { return }
+        onStart(address.trimmingCharacters(in: .whitespacesAndNewlines))
+        dismiss()
     }
 }

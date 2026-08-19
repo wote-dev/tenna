@@ -100,7 +100,8 @@ class DashboardScreenTest {
                     DashboardScreen(
                         state = state,
                         onOpenNotificationAccess = {}, onOpenAccessibility = {},
-                        onScanQr = {}, onPair = { true }, onUnpair = {}
+                        onScanQr = {}, onPair = { true }, onUnpair = {},
+                        onSetSmsEnabled = {}
                     )
                 }
             }
