@@ -19,8 +19,8 @@ import androidx.core.view.WindowCompat
 
 /**
  * Soft light aero: pale cyan-to-lavender gradient, frosted white panels, hairline edges.
- * Seeded from the app icon and kept in step with `web/styles.css`, which already speaks
- * this language — the two should read as one product.
+ * Seeded from the app icon masters in `assets/icon/`, so the app reads as the same product
+ * the icon does.
  *
  * Light only. The glass effect is carried by white at 30-60% over a pale gradient, and
  * there is no honest dark inversion of that which still looks like the icon. See the

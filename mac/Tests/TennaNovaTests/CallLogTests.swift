@@ -63,6 +63,38 @@ struct CallLogTests {
         #expect(log.missedCount == 1)
     }
 
+    @Test func lookingAtRecentsClearsTheMissedBadge() {
+        // The badge means "you owe someone a call back", so the list having been on screen
+        // is what clears it. Without this it could only go down by the list rolling over.
+        var log = CallLog()
+        log.apply(makeCall())
+        log.apply(makeCall(state: "ended"))
+        #expect(log.missedCount == 1)
+
+        log.markRecentsSeen()
+        #expect(log.missedCount == 0)
+        // Marked, not removed: the entry is still there, and still a missed call.
+        #expect(log.recents.count == 1)
+        #expect(log.recents[0].isMissed)
+
+        // A later missed call is news again.
+        log.apply(makeCall(id: "b"))
+        log.apply(makeCall(id: "b", state: "ended"))
+        #expect(log.missedCount == 1)
+    }
+
+    @Test func aReKeyedCallThatIsMissedAfterAllStillCounts() {
+        // Revived out of a recents entry the user had already read. How that entry ended
+        // says nothing about how this call does.
+        var log = CallLog()
+        log.apply(makeCall(id: "ring"), at: TestClock.origin)
+        log.apply(makeCall(id: "ring", state: "ended"), at: TestClock.after(1))
+        log.markRecentsSeen()
+        log.apply(makeCall(id: "ring-again"), at: TestClock.after(2))
+        log.apply(makeCall(id: "ring-again", state: "ended"), at: TestClock.after(3))
+        #expect(log.missedCount == 1)
+    }
+
     @Test func anOutgoingCallIsNeverMissed() {
         var log = CallLog()
         log.apply(makeCall(state: "active", direction: "outgoing"))

@@ -6,7 +6,7 @@
 //
 // The machine has Command Line Tools but not Xcode, and neither Pillow nor ImageMagick.
 // `sips` can resize but cannot mask to a shape with alpha, which the macOS squircle and
-// the round web favicon both need — hence CoreGraphics.
+// the round icon both need — hence CoreGraphics.
 
 import AppKit
 import CoreGraphics
@@ -330,10 +330,13 @@ for (name, size) in [("icon_16x16", 16), ("icon_16x16@2x", 32),
              to: iconset + "/\(name).png")
 }
 
-// Web. These were JPEG data carrying a .png extension and declared image/png, which is
-// why the "circle" favicon has never actually been circular.
-writePNG(render(squareArt, size: 512, mask: .squircle), to: p("web/media/icon-square.png"))
-writePNG(render(circleArt, size: 512, mask: .circle), to: p("web/media/icon-circle.png"))
+// Masked renders, for docs and anywhere else the icon is shown outside an app. These were
+// once JPEG data carrying a .png extension, which is why the "circle" one has never
+// actually been circular.
+writePNG(render(squareArt, size: 512, mask: .squircle),
+         to: p("assets/icon/generated/icon-square.png"))
+writePNG(render(circleArt, size: 512, mask: .circle),
+         to: p("assets/icon/generated/icon-circle.png"))
 
 // Play Console applies its own mask, so this one ships square.
 writePNG(render(squareArt, size: 512, mask: .none),

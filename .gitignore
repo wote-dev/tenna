@@ -13,6 +13,8 @@ android/app/build/
 android/local.properties
 android/.kotlin/
 *.apk
+# ...except the one shipped in the repo, so the phone app can be installed without a toolchain.
+!/Tennanova.apk
 
 # Node (the relay has its own ignore too; this is belt and braces)
 node_modules/

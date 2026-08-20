@@ -77,6 +77,14 @@ dependencies {
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
 
+    // `play-services-base` drags in `fragment:1.0.0`, whose `FragmentActivity` never calls
+    // `super.onRequestPermissionsResult`. Nothing here uses fragments, but the version on the
+    // classpath is what `lintVital` reads, and it fails the release build over it. A
+    // constraint raises the transitive version without adding a dependency of our own.
+    constraints {
+        implementation("androidx.fragment:fragment:1.8.5")
+    }
+
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20240303")
     androidTestImplementation(composeBom)

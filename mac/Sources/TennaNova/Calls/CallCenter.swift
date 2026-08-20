@@ -36,6 +36,10 @@ struct MirroredCall: Identifiable, Equatable {
     /// What went wrong the last time this Mac tried to do something about this call.
     /// Cleared by the next state the phone sends, because that state is newer news.
     var failure: String?
+    /// Whether the user has since had the recents list in front of them. Only missed calls
+    /// care: without it the sidebar badge would count every missed call still in recents,
+    /// so it could only ever go down by the list rolling over.
+    var seen: Bool = false
 
     /// Whoever is calling, in the order a person would want it. Never the app's name on
     /// its own unless nothing else exists — the card names the app separately.
@@ -142,7 +146,9 @@ struct CallLog: Equatable {
 
     var isRinging: Bool { live.contains { $0.state == .ringing } }
 
-    var missedCount: Int { recents.filter(\.isMissed).count }
+    /// Missed calls the user has not looked at yet. The badge this drives is a "you owe
+    /// someone a call back" mark, not a running total, so looking at the list clears it.
+    var missedCount: Int { recents.filter { $0.isMissed && !$0.seen }.count }
 
     @discardableResult
     mutating func apply(_ m: CallStateMessage, at now: Date = Date()) -> CallChange {
@@ -193,6 +199,9 @@ struct CallLog: Equatable {
         recents.removeFirst()
         candidate.id = m.id
         candidate.endedAt = nil
+        // It is a live call again, so whether the user had already read the recents entry
+        // it came from says nothing about how this one ends.
+        candidate.seen = false
         return candidate
     }
 
@@ -201,6 +210,12 @@ struct CallLog: Equatable {
     mutating func noteFailure(_ id: String, _ message: String) {
         guard let index = live.firstIndex(where: { $0.id == id }) else { return }
         live[index].failure = message
+    }
+
+    /// The recents list has been on screen, so nothing in it is news any more. Marks
+    /// rather than removes: the list is still worth reading once the badge is gone.
+    mutating func markRecentsSeen() {
+        for i in recents.indices where !recents[i].seen { recents[i].seen = true }
     }
 
     mutating func clearRecents() { recents.removeAll() }
@@ -253,6 +268,10 @@ final class CallCenter {
 
     func noteFailure(_ id: String, _ message: String) {
         log.noteFailure(id, message)
+    }
+
+    func markRecentsSeen() {
+        log.markRecentsSeen()
     }
 
     func clearRecents() {

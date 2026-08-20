@@ -44,8 +44,8 @@ data class SoftShadow(
 )
 
 /**
- * The glass vocabulary, mirroring `web/styles.css`'s `--surface` / `--hairline` / shadow
- * tokens. Held as plain colours rather than an array so the class keeps value equality.
+ * The glass vocabulary: surface, hairline and shadow tokens, held as plain colours rather
+ * than an array so the class keeps value equality.
  */
 @Immutable
 data class GlassTokens(

@@ -52,6 +52,12 @@ struct CallsView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .navigationTitle("Calls")
+        .task { state.calls.markRecentsSeen() }
+        // A call ending while this pane is open is being read as it lands, so the sidebar
+        // badge must not start climbing behind the reader's back.
+        .onChange(of: state.calls.recents.first?.id) { _, _ in
+            state.calls.markRecentsSeen()
+        }
     }
 
     /// Nothing ringing. Which of the three reasons it is decides what is worth saying.

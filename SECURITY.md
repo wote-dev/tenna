@@ -52,8 +52,8 @@ Being explicit about this is more useful than implying more than is true.
 
 In scope: both apps, the relay, and `protocol/PROTOCOL.md`.
 
-Out of scope: findings that require a Mac or phone that is already compromised; the landing page
-in `web/`, which is a static marketing page that collects nothing; and reports that amount to
+Out of scope: findings that require a Mac or phone that is already compromised, and reports that
+amount to
 "deprecated `SecKeychain` API is used", which is a documented and deliberate choice —
 `mac/Sources/TennaNova/Server/TLSIdentity.swift` explains why, and the modern replacement is
 gated behind a paid Apple Developer account this project deliberately does not require.

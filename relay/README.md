@@ -83,8 +83,8 @@ fly launch --copy-config --no-deploy && fly deploy
 ```
 
 **Serverless will not work.** Vercel/Lambda-style functions cap request duration, and a
-Tennanova session is meant to idle for hours. The `web/` landing page on Vercel is
-unrelated to this.
+Tennanova session is meant to idle for hours. Hosting a static site on one of those says
+nothing about whether it can carry this.
 
 Once deployed, put the host name in `TennaNova/Core/Relay.swift` (`Relay.defaultHost`)
 and `com/tennanova/net/RelayConfig.kt` so new pairings carry it in the QR.
