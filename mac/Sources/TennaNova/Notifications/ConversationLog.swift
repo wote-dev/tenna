@@ -56,6 +56,20 @@ enum ConversationKey: Hashable, Codable {
         return false
     }
 
+    /// How this key was *grouped* — one row per chat, or one row per app.
+    ///
+    /// A weaker claim than it looks, and **not** the test the window's tabs use. Grouping
+    /// honours `conversationTitle` and a `msg` category on their own, and a promotional
+    /// notification that claims either — several do, because the category buys priority —
+    /// gets a row of its own here. That is harmless for grouping and wrong for an inbox.
+    /// See `ConversationThread.isChat`.
+    var groupsAsChat: Bool {
+        switch self {
+        case .sms, .conversation, .keyed: return true
+        case .app:                        return false
+        }
+    }
+
     /// Stable tiebreaker so equal timestamps cannot make the sidebar reorder itself.
     var sortKey: String {
         switch self {
@@ -122,12 +136,31 @@ struct ConversationThread: Identifiable, Codable, Equatable {
     /// For `.sms` threads: the number to text. Notification threads reply through their
     /// own action instead and leave this nil.
     var smsAddress: String?
+    /// Whether a *person* is talking here, on the evidence of the notifications
+    /// themselves: a sender from MessagingStyle, or an inline reply button. Sticky once
+    /// true — a chat app that posts one message without a reply action is still a chat.
+    ///
+    /// Nil for threads restored from an archive written before this existed;
+    /// `normalizeAfterRestore` fills those in from the reply action it already stored.
+    var isConversation: Bool?
     /// The phone's own one-line preview, shown until this thread's history is fetched.
     /// A summary carries a snippet, not a transcript, so a never-opened SMS thread would
     /// otherwise sit blank in the sidebar.
     var snippet: String?
 
     var latest: MirroredMessage? { messages.last }
+
+    /// Whether this belongs in **Messages** rather than **Notifications**.
+    ///
+    /// Deliberately stricter than `id.groupsAsChat`, which is only about how rows were
+    /// grouped. Grouping trusts a `msg` category and a `conversationTitle` on their own,
+    /// and marketing notifications set both — a food delivery promo landed in the inbox
+    /// beside actual people. A sender or a reply button is the evidence that does not
+    /// misfire: no promotion carries either, and every real chat carries at least one.
+    ///
+    /// Falls back to the grouping for a thread restored before the flag existed, which
+    /// `normalizeAfterRestore` then resolves properly.
+    var isChat: Bool { isConversation ?? id.groupsAsChat }
 
     /// The one line the sidebar shows under the thread name.
     ///
@@ -191,6 +224,24 @@ struct ConversationLog: Codable, Equatable {
 
     var totalUnread: Int { threads.values.reduce(0) { $0 + $1.unreadCount } }
 
+    /// Chats — texts, WhatsApp, Signal — most recent first.
+    var conversationsByRecency: [ConversationThread] {
+        threadsByRecency.filter(\.isChat)
+    }
+
+    /// Everything else the phone showed: deliveries, backups, promotions.
+    var alertsByRecency: [ConversationThread] {
+        threadsByRecency.filter { !$0.isChat }
+    }
+
+    var conversationUnread: Int {
+        threads.values.reduce(0) { $0 + ($1.isChat ? $1.unreadCount : 0) }
+    }
+
+    var alertUnread: Int {
+        threads.values.reduce(0) { $0 + ($1.isChat ? 0 : $1.unreadCount) }
+    }
+
     subscript(key: ConversationKey) -> ConversationThread? { threads[key] }
 
     // MARK: - Ingest
@@ -222,6 +273,8 @@ struct ConversationLog: Codable, Equatable {
         // for as long as its listener lives. `notif.reply.keys` corrects this wholesale on
         // the next reconnect.
         if n.actions.contains(where: { $0.isReply }) { replyableKeys.insert(n.key) }
+        // Sticky: one message without a reply action does not stop a chat being a chat.
+        thread.isConversation = (thread.isConversation ?? false) || n.isSomebodyTalking
 
         defer { threads[key] = thread; evictThreadsIfNeeded() }
 
@@ -299,6 +352,7 @@ struct ConversationLog: Codable, Equatable {
             )
             thread.title = summary.displayName
             thread.smsAddress = summary.address
+            thread.isConversation = true
             thread.lastActivity = max(thread.lastActivity, stamp)
             // The phone counts unread from the provider, which is the truth: it knows
             // about texts read on the phone that never reached this Mac at all.
@@ -334,6 +388,7 @@ struct ConversationLog: Codable, Equatable {
             lastActivity: stamp
         )
         if thread.smsAddress == nil { thread.smsAddress = m.address }
+        thread.isConversation = true
         // An incoming text names the other party; an outgoing one names us, and must not
         // rewrite the conversation's title to our own number.
         if !m.outgoing, let name = m.displayName, !name.isEmpty { thread.title = name }
@@ -399,7 +454,8 @@ struct ConversationLog: Codable, Equatable {
             appLabel: "Messages",
             title: title,
             lastActivity: Date(),
-            smsAddress: address
+            smsAddress: address,
+            isConversation: true
         )
         return key
     }
@@ -528,6 +584,15 @@ struct ConversationLog: Codable, Equatable {
 
     mutating func clear() { threads.removeAll() }
 
+    /// Puts the log back in the shape an archive written before `isConversation` existed
+    /// would restore into, so the upgrade path can be tested rather than assumed.
+    mutating func forgetConversationFlagsForTesting() {
+        for (key, var thread) in threads {
+            thread.isConversation = nil
+            threads[key] = thread
+        }
+    }
+
     // MARK: - Restoring
 
     /// Corrects the two claims a saved transcript can no longer make.
@@ -543,6 +608,13 @@ struct ConversationLog: Codable, Equatable {
         // The phone replaces this wholesale the moment it does.
         replyableKeys.removeAll()
         for (key, var thread) in threads {
+            // Written before the flag existed. The retained reply action is the same
+            // evidence a live notification would carry, and it is already on disk — so a
+            // restored inbox sorts itself out without waiting for the next message.
+            if thread.isConversation == nil {
+                thread.isConversation = thread.id.isSms
+                    || thread.latestActions.contains { $0.isReply }
+            }
             thread.isLiveOnPhone = false
             for index in thread.messages.indices where thread.messages[index].delivery == .sending {
                 thread.messages[index].delivery = .failed("Not sent — Tennanova quit")

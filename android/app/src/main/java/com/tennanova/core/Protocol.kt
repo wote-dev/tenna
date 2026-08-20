@@ -1,5 +1,7 @@
 package com.tennanova.core
 
+import com.tennanova.calls.CallAction
+import com.tennanova.calls.CallSnapshot
 import com.tennanova.net.RelayConfig
 import org.json.JSONArray
 import org.json.JSONObject
@@ -37,6 +39,18 @@ object Proto {
      * would show every text twice.
      */
     const val SMS_CAPABILITY = "sms.v1"
+
+    /**
+     * This phone mirrors incoming and ongoing calls, and can answer, decline and end one
+     * on the Mac's behalf.
+     *
+     * Calls are read out of notifications, which is what makes this cover WhatsApp and
+     * Signal calls as well as cellular ones and costs no permission beyond the notification
+     * access the app already has. **Audio is not part of it and cannot be** — Android lets
+     * no third-party app capture voice-call audio — so the Mac rings and controls, and the
+     * sound stays on this phone.
+     */
+    const val CALL_CAPABILITY = "call.v1"
     const val MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
     /** Everything this build can do. SMS is added per-connection once it is switched on. */
@@ -226,6 +240,57 @@ object Messages {
             .put("body", body)
             .put("origin", "android")
             .put("seq", seq)
+
+    // MARK: - Calls
+
+    /**
+     * One call, on every change to it. `ENDED` is the last thing sent for an id.
+     *
+     * The capability flags travel per call rather than per phone: whether *this*
+     * notification carried an answer intent, and whether Telecom will take it otherwise.
+     * A Mac that drew a button resolving to nothing would be worse than one that drew none.
+     */
+    fun callState(call: CallSnapshot, resync: Boolean): JSONObject =
+        Proto.envelope("call.state").apply {
+            put("id", call.id)
+            put("state", call.state.wire)
+            put("direction", call.direction.wire)
+            put("pkg", call.pkg)
+            put("appLabel", call.appLabel)
+            call.iconHash?.let { put("iconHash", it) }
+            call.avatarHash?.let { put("avatarHash", it) }
+            call.displayName?.let { put("displayName", it) }
+            call.number?.let { put("number", it) }
+            put("video", call.isVideo)
+            put("when", call.whenMs)
+            put("canAnswer", call.canAnswer)
+            put("canDecline", call.canDecline)
+            put("canHangUp", call.canHangUp)
+            if (resync) put("resync", true)
+            put("actions", JSONArray().apply {
+                call.actions.forEach {
+                    put(JSONObject()
+                        .put("id", it.id)
+                        .put("label", it.label)
+                        .put("isReply", it.isReply))
+                }
+            })
+        }
+
+    /** What became of a `call.action`. Failure carries a sentence the Mac shows as-is. */
+    fun callActionResult(
+        clientId: String?,
+        id: String,
+        action: CallAction,
+        ok: Boolean,
+        error: String?
+    ): JSONObject = Proto.envelope("call.action.result").apply {
+        clientId?.let { put("clientId", it) }
+        put("id", id)
+        put("action", action.wire)
+        put("ok", ok)
+        error?.let { put("error", it) }
+    }
 
     // MARK: - SMS
 

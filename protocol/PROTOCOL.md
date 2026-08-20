@@ -217,7 +217,7 @@ the Mac can tell "this build cannot" from "this phone has not been asked yet".
 ```jsonc
 // Android -> Mac, the conversation list, after hello.ack
 {"v":1,"type":"sms.threads","threads":[
-  {"id":42,"address":"+61401660454","displayName":"Sam",
+  {"id":42,"address":"+61491570006","displayName":"Sam",
    "snippet":"see you at 8","when":1723900000000,"unread":3}]}
 
 // Mac -> Android, open a conversation (beforeId pages further back)
@@ -225,14 +225,14 @@ the Mac can tell "this build cannot" from "this phone has not been asked yet".
 
 // Android -> Mac, one page, oldest first. complete=false means more history remains.
 {"v":1,"type":"sms.messages","threadId":42,"complete":true,"messages":[
-  {"id":992,"threadId":42,"address":"+61401660454","displayName":"Sam",
+  {"id":992,"threadId":42,"address":"+61491570006","displayName":"Sam",
    "body":"are you close?","when":1723900000000,"outgoing":false,"read":true}]}
 
 // Android -> Mac, one new message, pushed live by a ContentObserver
 {"v":1,"type":"sms.received","message":{…}}
 
 // Mac -> Android, send
-{"v":1,"type":"sms.send","address":"+61401660454","body":"five minutes","clientId":"9F3B…"}
+{"v":1,"type":"sms.send","address":"+61491570006","body":"five minutes","clientId":"9F3B…"}
 
 // Android -> Mac, what the radio said
 {"v":1,"type":"sms.send.result","clientId":"9F3B…","ok":false,"error":"The phone's radio is off."}
@@ -277,7 +277,88 @@ app it came from, and that job goes to `iconHash`. Neither hash is part of the M
 duplicate fingerprint: a picture that arrives after the card was shown must never make the
 next notification alert twice.
 
-### App icons
+## Calls — capability `call.v1`
+
+**Android does not let a third-party app capture voice-call audio.** `CAPTURE_AUDIO_OUTPUT` is
+privileged, and the accessibility workaround was closed in 2022. So the Mac is a *control
+surface*: it rings, it names the caller, and it answers, declines and hangs up. The audio
+stays on the phone or on whatever Bluetooth headset the phone is already using. Every
+surface that offers a call button says so, rather than letting a user pick up on the Mac
+and then wonder why the room is silent.
+
+Calls arrive as **notifications**, not as a telephony API. That is deliberate and it is
+what makes this work for WhatsApp, Signal and Telegram calls as well as cellular ones: a
+call is the one thing every app on Android must post a notification for. It also costs no
+permission at all — the notification listener is already granted.
+
+`call.v1` is advertised while the user has calls switched on. `canAnswer` / `canDecline` /
+`canHangUp` then say, per call, what this phone can actually do about *that* call, which is
+not the same question: a notification carrying no answer intent on a phone without
+`ANSWER_PHONE_CALLS` can be shown and not answered.
+
+```jsonc
+// Android -> Mac, on every change to a call. `ended` is the last one for that id.
+{"v":1,"type":"call.state",
+ "id":"0|com.samsung.android.dialer|1|null|1000", // opaque, stable for the call's life
+ "state":"ringing|active|ended",
+ "direction":"incoming|outgoing",
+ "pkg":"com.samsung.android.dialer",
+ "appLabel":"Phone",
+ "iconHash":"ab12cd…",                 // optional, the app icon, same channel as notifications
+ "avatarHash":"ef34ab…",                // optional, the caller's photo
+ "displayName":"Sam",                   // optional, resolved on the phone
+ "number":"+61491570006",               // optional
+ "video":false,
+ "when":1723900000000,
+ "canAnswer":true, "canDecline":true, "canHangUp":false,
+ "resync":true,                         // optional, present only on a reconnect replay
+ "actions":[{"id":2,"label":"Message","isReply":false}]}
+
+// Mac -> Android
+{"v":1,"type":"call.action","id":"…","action":"answer|decline|hangup","clientId":"9F3B…"}
+
+// Android -> Mac, what became of it
+{"v":1,"type":"call.action.result","clientId":"9F3B…","id":"…","action":"answer",
+ "ok":false,"error":"This phone cannot answer calls from the Mac yet."}
+```
+
+`actions` are the notification's *other* buttons — "Message", "Remind me". They are fired
+with the existing **`notif.action`**, whose `key` is this call's `id`: a call's actions are
+retained under the same key as any other notification's, so calls needed no second action
+channel of their own.
+
+Answer and decline are **not** in that list. They are resolved on the phone, in this order,
+and `canAnswer`/`canDecline` report whether any of it will actually work:
+
+1. `Notification.EXTRA_ANSWER_INTENT` / `EXTRA_DECLINE_INTENT` / `EXTRA_HANG_UP_INTENT` —
+   the `CallStyle` intents. Present for anything built against API 31+, and they are the
+   app's own buttons, so they do exactly what pressing them on the phone does.
+2. `TelecomManager.acceptRingingCall()` / `endCall()`, which need the optional
+   `ANSWER_PHONE_CALLS` grant and work only for calls Telecom manages — cellular ones, and
+   VoIP apps that register a `ConnectionService`. This is the fallback for a dialer whose
+   notification carries no intents.
+
+There is deliberately no mute: muting a call needs an `InCallService`, which needs the
+default-dialer role, and a dead button is worse than an absent one.
+
+**A call is not a conversation.** It never enters the thread log — `notif.posted` is not
+sent for a notification that classified as a call, or every ring would also leave a chat
+row that can never be replied to. `state:"ended"` is sent when the phone withdraws the
+notification, which is what ending a call does.
+
+**Direction and state** come from `Notification.EXTRA_CALL_TYPE` when the notification is a
+`CallStyle` one (`1` incoming → ringing, `2` ongoing → active, `3` screening → ringing).
+Without it, an ongoing-flagged call notification is active and anything else is ringing.
+Android never states the *direction*, so the phone infers it from how the call was first
+seen — ringing means arriving — and the Mac uses it only to label a row in its recents.
+
+**One call can arrive under two ids.** Some dialers do not update their notification when a
+call is answered: they cancel it and post a fresh one. On the wire that is an `ended`
+immediately followed by an unrelated `active`, which read literally is a missed call plus a
+call from nowhere. The Mac folds a new call into the one that ended moments earlier when
+the caller matches, so this stays one call — and one that was answered, not missed.
+
+## App icons
 
 Icons are content-addressed by hash so each one crosses the wire once, ever.
 
@@ -291,7 +372,7 @@ Icons are content-addressed by hash so each one crosses the wire once, ever.
 
 The Mac caches to `~/Library/Caches/com.tennanova.mac/icons/<hash>.png`.
 
-### Clipboard
+## Clipboard
 
 ```jsonc
 // either direction

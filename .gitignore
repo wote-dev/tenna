@@ -16,3 +16,6 @@ android/.kotlin/
 
 # Scratch
 *.log
+
+# Internal working notes, not part of the public repo
+HANDOFF.md

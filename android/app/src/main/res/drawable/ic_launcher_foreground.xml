@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<inset xmlns:android="http://schemas.android.com/apk/res/android"
-    android:insetLeft="18dp"
-    android:insetTop="18dp"
-    android:insetRight="18dp"
-    android:insetBottom="18dp">
-    <bitmap
-        android:src="@drawable/tennanova_icon"
-        android:gravity="fill" />
-</inset>
+<!--
+  Full-bleed, deliberately. The artwork is already a rounded tile, so insetting it to the
+  72dp safe zone drew a tile inside the launcher's own mask — a visible double-rounded
+  corner. Filling the 108dp canvas lets the system mask do the rounding. The ribbon is ~55%
+  of the tile width, so it lands at ~59dp, inside the 66dp guaranteed-visible circle.
+-->
+<bitmap xmlns:android="http://schemas.android.com/apk/res/android"
+    android:src="@drawable/tennanova_icon"
+    android:gravity="fill" />

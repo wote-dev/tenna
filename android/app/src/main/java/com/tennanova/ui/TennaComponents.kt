@@ -18,15 +18,24 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
-/** Small live-status mark, matching the Mac menu bar. */
+/**
+ * Small live-status mark, matching the Mac menu bar. The halo is what keeps it reading as
+ * a lit mark rather than a printed dot once it sits on glass.
+ */
 @Composable
 internal fun StatusDot(color: Color, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .size(8.dp)
-            .clip(CircleShape)
-            .background(color)
-    )
+    Box(modifier = modifier.size(18.dp), contentAlignment = Alignment.Center) {
+        Box(
+            Modifier.size(18.dp)
+                .clip(CircleShape)
+                .background(color.copy(alpha = 0.18f))
+        )
+        Box(
+            Modifier.size(8.dp)
+                .clip(CircleShape)
+                .background(color)
+        )
+    }
 }
 
 @Composable
@@ -48,7 +57,7 @@ internal fun StatusHeadline(
 ) {
     Row(
         modifier = modifier,
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         StatusDot(accent)

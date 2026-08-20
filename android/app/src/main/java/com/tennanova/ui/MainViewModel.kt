@@ -7,6 +7,9 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.tennanova.clipboard.ClipboardAccessStatus
 import com.tennanova.clipboard.TennaAccessibilityService
+import android.Manifest
+import android.content.pm.PackageManager
+import com.tennanova.core.CallAccessStatus
 import com.tennanova.core.ConnectionStatus
 import com.tennanova.core.PairingPayload
 import com.tennanova.core.RuntimeStatusStore
@@ -34,6 +37,7 @@ data class MainUiState(
     val clipboard: ClipboardAccessStatus = ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
     val sms: SmsAccessStatus = SmsAccessStatus.OFF,
     val smsThreadCount: Int = 0,
+    val calls: CallAccessStatus = CallAccessStatus.OFF,
     val peerSupportsImages: Boolean = false,
     val lastTransfer: String? = null,
     val message: String? = null,
@@ -107,6 +111,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             // here and adding a sixth would force the vararg form for no gain.
             sms = runtime.sms,
             smsThreadCount = runtime.smsThreadCount,
+            calls = runtime.calls,
             peerSupportsImages = runtime.peerSupportsImages,
             lastTransfer = runtime.lastTransfer,
             message = localMessage
@@ -136,6 +141,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 else -> SmsAccessStatus.READY
             }
         )
+        RuntimeStatusStore.updateCalls(
+            when {
+                !settings.callsEnabled -> CallAccessStatus.OFF
+                callControlGranted() -> CallAccessStatus.READY
+                else -> CallAccessStatus.LIMITED
+            }
+        )
         if (!accessibilityEnabled.value) {
             RuntimeStatusStore.updateClipboard(ClipboardAccessStatus.NEEDS_ACCESSIBILITY)
         } else if (RuntimeStatusStore.state.value.clipboard != ClipboardAccessStatus.ERROR) {
@@ -161,6 +173,42 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun smsEnabled(): Boolean = settings.smsEnabled
+
+    /**
+     * Calls are the one feature here that is on by default, because turning it on asks
+     * nothing of the user: a call is read out of a notification this app already receives,
+     * and the notifications it reads are ones the mirror used to drop.
+     */
+    fun setCallsEnabled(enabled: Boolean) {
+        settings.callsEnabled = enabled
+        refreshAccessState()
+        show(
+            Banner(
+                if (enabled) "Calls will ring on your Mac. The audio stays on this phone."
+                else "Calls stay on this phone.",
+                transient = true
+            )
+        )
+        // The listener holds the socket and advertises the capability, and it only learns
+        // about this when it next says hello.
+        RuntimeStatusStore.pairingChanged()
+    }
+
+    fun callsEnabled(): Boolean = settings.callsEnabled
+
+    /** See [Settings.callControlAsked] — false before the first ask *and* after a
+     *  permanent refusal, which the caller has to tell apart. */
+    fun callControlAsked(): Boolean = settings.callControlAsked
+
+    fun noteCallControlAsked() {
+        settings.callControlAsked = true
+    }
+
+    /** The optional grant that answers a call whose dialer offers no button to press. */
+    fun callControlGranted(): Boolean =
+        getApplication<Application>().checkSelfPermission(
+            Manifest.permission.ANSWER_PHONE_CALLS
+        ) == PackageManager.PERMISSION_GRANTED
 
     fun smsPermissionsGranted(): Boolean {
         val mirror = SmsMirror(getApplication())

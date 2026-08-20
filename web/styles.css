@@ -43,6 +43,10 @@
 
   --primary: #0EA5E9;
   --primary-strong: #0284C7;
+  /* The two above are tints; white text needs this one. #0EA5E9 carries white at 2.77:1
+     and #0284C7 at 4.10:1, both under AA. This is 5.15:1, and is TennaTheme.kt's
+     `primary` and TennaStyle.swift's `accentFill`. */
+  --primary-deep: #0273B0;
   --primary-wash: rgba(14, 165, 233, 0.1);
   --primary-container: #E0F2FE;
 
@@ -186,14 +190,14 @@ body {
 }
 
 .btn--primary {
-  background: linear-gradient(135deg, var(--primary), var(--primary-strong));
+  background: linear-gradient(135deg, var(--primary-deep), #045D8F);
   color: #fff;
   box-shadow: var(--shadow-soft);
   border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .btn--primary:hover {
-  background: linear-gradient(135deg, var(--primary-strong), #0369A1);
+  background: linear-gradient(135deg, #025F92, #034E78);
   transform: translateY(-1px);
 }
 

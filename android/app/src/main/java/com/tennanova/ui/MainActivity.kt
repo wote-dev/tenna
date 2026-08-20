@@ -2,6 +2,7 @@ package com.tennanova.ui
 
 import android.Manifest
 import android.content.Intent
+import android.graphics.Color.TRANSPARENT
 import android.content.ComponentName
 import android.net.Uri
 import android.os.Bundle
@@ -10,6 +11,7 @@ import android.provider.Settings as AndroidSettings
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.compose.runtime.getValue
@@ -86,6 +88,51 @@ class MainActivity : ComponentActivity() {
         )
     }
 
+    /**
+     * Call control, which is an *upgrade* and not a gate.
+     *
+     * Unlike SMS, a denial here does not turn the feature off: calls still reach the Mac,
+     * and most dialers put answer and decline intents in their notification, so refusing
+     * this leaves a working feature slightly narrower rather than a broken one.
+     */
+    private val callPermissions = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { granted ->
+        viewModel.refreshAccessState()
+        if (granted[Manifest.permission.ANSWER_PHONE_CALLS] == true) {
+            viewModel.setMessage("Tennanova can now answer calls from your Mac.", transient = true)
+        } else {
+            viewModel.setMessage(
+                "Calls will still ring on your Mac, using your dialer's own buttons.",
+                transient = true
+            )
+        }
+    }
+
+    private fun setCallsEnabled(enabled: Boolean) {
+        viewModel.setCallsEnabled(enabled)
+        if (enabled && !viewModel.callControlGranted()) requestCallControl()
+    }
+
+    private fun requestCallControl() {
+        if (viewModel.callControlGranted()) return
+        // "Don't ask again" makes the system dialog stop appearing, and a button that does
+        // nothing when tapped is indistinguishable from a broken one.
+        if (!shouldShowRequestPermissionRationale(Manifest.permission.ANSWER_PHONE_CALLS) &&
+            !shouldShowRequestPermissionRationale(Manifest.permission.READ_PHONE_STATE) &&
+            viewModel.callControlAsked()) {
+            openAppSettings()
+            return
+        }
+        viewModel.noteCallControlAsked()
+        callPermissions.launch(
+            arrayOf(
+                Manifest.permission.ANSWER_PHONE_CALLS,
+                Manifest.permission.READ_PHONE_STATE
+            )
+        )
+    }
+
     private fun openAppSettings() {
         startActivity(
             Intent(AndroidSettings.ACTION_APPLICATION_DETAILS_SETTINGS)
@@ -98,7 +145,15 @@ class MainActivity : ComponentActivity() {
         onboardingStep = savedInstanceState?.getString(KEY_ONBOARDING_STEP)
             ?.let { runCatching { OnboardingStep.valueOf(it) }.getOrNull() }
         shareConsumed = savedInstanceState?.getBoolean(KEY_SHARE_CONSUMED) == true
-        enableEdgeToEdge()
+        // Explicit transparent styles rather than the defaults: the app is light-only, and
+        // the auto styles would flip the bar icons with the system's dark-mode setting even
+        // though the backdrop stays pale. isNavigationBarContrastEnforced is what stops
+        // Android painting a translucent grey band over the bottom of the gradient.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(TRANSPARENT, TRANSPARENT),
+            navigationBarStyle = SystemBarStyle.light(TRANSPARENT, TRANSPARENT)
+        )
+        window.isNavigationBarContrastEnforced = false
         consumePairingExtra(intent)
         consumeSharedContent(intent)
         setContent {
@@ -120,6 +175,8 @@ class MainActivity : ComponentActivity() {
                     },
                     onUnpair = viewModel::unpair,
                     onSetSmsEnabled = ::setSmsEnabled,
+                    onSetCallsEnabled = ::setCallsEnabled,
+                    onGrantCallControl = ::requestCallControl,
                 )
             }
         }

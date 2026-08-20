@@ -1,6 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#04110F</color>
-    <!-- Matches TennaTheme light background. -->
-    <color name="launch_background">#F5FBF8</color>
+    <!-- Sampled from the icon artwork's edge by tools/make-icons.sh, so the sliver some
+         launchers reveal during the adaptive-icon parallax matches the tile. -->
+    <color name="ic_launcher_background">#EDEFF9</color>
+
+    <!-- The three stops of TennaTheme's backdrop. The launch window paints the same
+         gradient, so the splash cross-fades into the app with no colour step. -->
+    <color name="launch_gradient_start">#E0EAFC</color>
+    <color name="launch_gradient_mid">#CFDEF3</color>
+    <color name="launch_gradient_end">#E2D4F0</color>
 </resources>

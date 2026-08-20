@@ -24,7 +24,7 @@ short one for `index.html`.
 index.html   markup and copy
 styles.css   tokens, layout, cards, form — light palette mirrors TennaTheme.kt
 script.js    waitlist form handling, sticky-header state, offscreen fade-in
-media/       icon and the device still, WebP with JPEG/PNG fallbacks
+media/       icon and the device still, PNG (icons carry alpha)
 fonts/       self-hosted latin woff2 subsets (Bricolage Grotesque, Source Sans 3, IBM Plex Mono)
 ```
 

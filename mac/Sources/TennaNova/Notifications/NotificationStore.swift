@@ -28,6 +28,13 @@ final class NotificationStore {
     var threads: [ConversationThread] { log.threadsByRecency }
     var totalUnread: Int { log.totalUnread }
 
+    /// The two halves the window draws as separate sections. See
+    /// `ConversationThread.isChat` for why the line falls where it does.
+    var conversations: [ConversationThread] { log.conversationsByRecency }
+    var alerts: [ConversationThread] { log.alertsByRecency }
+    var conversationUnread: Int { log.conversationUnread }
+    var alertUnread: Int { log.alertUnread }
+
     // MARK: - Persistence
 
     /// Reads the saved transcript back. Separate from `init` because it belongs to app

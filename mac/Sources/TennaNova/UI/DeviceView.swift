@@ -13,16 +13,22 @@ struct DeviceView: View {
             VStack(alignment: .leading, spacing: 20) {
                 header
 
-                if state.status.isConnected {
-                    connected
-                } else if state.isPaired && !showPairingAnyway {
-                    // Not the QR. A paired phone that is merely offline used to land here
-                    // and be shown a pairing code, which reads as "you are not paired" and
-                    // sends people off to re-pair a pairing that was never the problem.
-                    waiting
-                } else {
-                    pairing
+                Group {
+                    if state.status.isConnected {
+                        connected
+                    } else if state.isPaired && !showPairingAnyway {
+                        // Not the QR. A paired phone that is merely offline used to land
+                        // here and be shown a pairing code, which reads as "you are not
+                        // paired" and sends people off to re-pair a pairing that was never
+                        // the problem.
+                        waiting
+                    } else {
+                        pairing
+                    }
                 }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .glassPanel(cornerRadius: 20)
 
                 if state.isPaired {
                     Divider()
@@ -115,6 +121,16 @@ struct DeviceView: View {
             StatusRow("Mirrored notifications, with replies",
                       symbol: "bell.badge",
                       tint: Tenna.accent)
+            StatusRow(state.supportsCalls
+                        ? "Calls — answer, decline and hang up from here"
+                        : "Calls are switched off on the phone",
+                      symbol: state.supportsCalls ? "phone" : "phone.down",
+                      tint: state.supportsCalls ? Tenna.accent : .secondary)
+            if state.supportsCalls {
+                Caption("Call audio stays on the phone. Android lets no app carry it to "
+                        + "a Mac, so this is a control surface — it rings, and it presses "
+                        + "the phone's buttons.")
+            }
 
             Button("Show pairing code") { showPairingAnyway = true }
                 .padding(.top, 4)

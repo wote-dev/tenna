@@ -67,8 +67,16 @@ final class AppState {
     /// toggle rather than offering to fix anything itself.
     var supportsSms: Bool { capabilities.contains(Proto.smsCapability) }
 
+    /// Whether this phone mirrors calls at all. False means an older phone build or a
+    /// user who has switched calls off there — either way the Calls pane says so rather
+    /// than sitting permanently empty with no explanation.
+    var supportsCalls: Bool { capabilities.contains(Proto.callCapability) }
+
     /// Everything the phone has mirrored, grouped into conversations.
     let history = NotificationStore()
+
+    /// Calls, which are deliberately not conversations. See `MirroredCall`.
+    let calls = CallCenter()
 
     /// App icons and contact photos, in a form the window can draw and observe.
     let icons: IconCatalog
@@ -116,6 +124,9 @@ final class AppState {
             presenter.onIconNeeded = { [weak self] hash in
                 self?.send(IconRequest(hash: hash))
             }
+            presenter.onCallAction = { [weak self] callId, action in
+                Task { @MainActor in self?.perform(action, onCallId: callId) }
+            }
             self.notifications = presenter
 
             let clip = PasteboardBridge()
@@ -144,6 +155,9 @@ final class AppState {
                 self.pendingBinary = nil
                 self.iconRequests.reset()
                 self.clipboard?.setPeerSupportsImages(false)
+                // A call this Mac can no longer act on must not keep a live card on
+                // screen: every button on it would now go nowhere.
+                self.calls.dropLiveCalls()
                 Task { @MainActor in
                     self.capabilities = []
                     self.status = .waitingForPhone
@@ -239,6 +253,7 @@ final class AppState {
         status = .waitingForPhone
         // A different phone's conversations must not survive into the next pairing.
         history.clearAll()
+        calls.clearAll()
         icons.clearAll()
     }
 
@@ -271,6 +286,21 @@ final class AppState {
                 history.ingest(m)
                 requestAssets(for: m)
                 notifications?.present(m)
+            }
+
+        case "call.state":
+            if let m = try? Wire.decode(CallStateMessage.self, from: data) {
+                requestAssets(iconHash: m.iconHash, avatarHash: m.avatarHash)
+                calls.apply(m) { [weak self] change in
+                    self?.present(change)
+                }
+            }
+
+        case "call.action.result":
+            if let m = try? Wire.decode(CallActionResult.self, from: data) {
+                guard !m.ok, let error = m.error else { return }
+                Log.warn("phone refused \(m.action) on a call: \(error)")
+                Task { @MainActor in self.calls.noteFailure(m.id, error) }
             }
 
         case "notif.removed":
@@ -536,10 +566,61 @@ final class AppState {
         send(NotifActionInvoke(key: key, actionId: action.id))
     }
 
+    // MARK: - Calls
+
+    /// Answers, declines or hangs up, and says so on the card when the frame could not
+    /// even be sent. The phone's own verdict arrives later as `call.action.result`.
+    ///
+    /// **The audio does not move.** Android lets no third-party app carry voice-call audio,
+    /// so this presses the phone's button from here; the sound stays on the phone or on
+    /// whatever headset the phone is already using. Every call surface says so out loud.
+    @MainActor
+    func perform(_ action: CallActionKind, on call: MirroredCall) {
+        perform(action, onCallId: call.id)
+    }
+
+    @MainActor
+    func perform(_ action: CallActionKind, onCallId id: String) {
+        let queued = send(CallActionInvoke(id: id, action: action,
+                                           clientId: UUID().uuidString))
+        if !queued {
+            calls.noteFailure(id, "Not sent — the phone is not connected.")
+        }
+    }
+
+    /// One of the dialer's own extra buttons — "Message", "Remind me". These travel on the
+    /// existing `notif.action` channel, whose key is the call's id, so calls needed no
+    /// second action protocol of their own.
+    @MainActor
+    func invoke(action: NotifAction, on call: MirroredCall) {
+        send(NotifActionInvoke(key: call.id, actionId: action.id))
+    }
+
     @MainActor
     func dismissOnPhone(_ conversation: ConversationKey) {
         guard let thread = history.log[conversation], let key = thread.latestKey else { return }
         send(NotifDismiss(key: key))
+    }
+
+    /// Rings, or stops ringing, on the strength of what the call log just decided.
+    ///
+    /// A card is withdrawn the moment the call stops needing an answer — whether it was
+    /// answered here, answered on the phone, or given up on — because a Notification
+    /// Center card offering to answer a call that is already in progress is worse than no
+    /// card at all.
+    @MainActor
+    private func present(_ change: CallChange) {
+        switch change {
+        case .started(let call):
+            guard call.state == .ringing else { return }
+            notifications?.presentCall(call)
+        case .updated(let call):
+            if call.state != .ringing { notifications?.withdrawCall(id: call.id) }
+        case .ended(let call):
+            notifications?.withdrawCall(id: call.id)
+        case .ignored:
+            break
+        }
     }
 
     /// Asks the phone for any PNG this notification references that we do not already have.
@@ -547,10 +628,15 @@ final class AppState {
     /// Both hashes, not just the icon: the window shows sender photos, and `avatarHash` has
     /// travelled on the wire since the beginning without anyone ever requesting it.
     private func requestAssets(for n: NotifPosted) {
+        requestAssets(iconHash: n.iconHash, avatarHash: n.avatarHash)
+    }
+
+    /// Shared with calls, whose card is drawn from the same two pictures.
+    private func requestAssets(iconHash: String?, avatarHash: String?) {
         // Already on disk from an earlier session or an earlier message: nothing to ask
         // for, but the window has not decoded it yet.
-        icons.warm([n.iconHash, n.avatarHash])
-        for hash in [n.iconHash, n.avatarHash].compactMap({ $0 }) where !iconCache.has(hash) {
+        icons.warm([iconHash, avatarHash])
+        for hash in [iconHash, avatarHash].compactMap({ $0 }) where !iconCache.has(hash) {
             guard iconRequests.shouldRequest(hash) else { continue }
             send(IconRequest(hash: hash))
         }

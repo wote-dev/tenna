@@ -514,7 +514,7 @@ struct SmsConversationTests {
 
         let thread = log[key]
         #expect(thread?.title == "Sam")
-        #expect(thread?.smsAddress == "+61401660454")
+        #expect(thread?.smsAddress == "+61491570006")
         #expect(thread?.unreadCount == 3)
         // A summary carries a snippet, not a transcript.
         #expect(thread?.messages.isEmpty == true)
@@ -588,9 +588,9 @@ struct SmsConversationTests {
 
     @Test func startingAConversationTwiceReusesTheSameThread() {
         var log = ConversationLog()
-        let first = log.draftSmsThread(address: "+61 401 660 454", title: "+61 401 660 454")
+        let first = log.draftSmsThread(address: "+61 491 570 006", title: "+61 491 570 006")
         // The same person, written the way a phone keypad produces it.
-        let second = log.draftSmsThread(address: "0401660454", title: "0401660454")
+        let second = log.draftSmsThread(address: "0491570006", title: "0491570006")
 
         #expect(first == second)
         #expect(log.threads.count == 1)
@@ -612,12 +612,12 @@ struct SmsAddressMatchTests {
 
     @Test func oneNumberWrittenSeveralWaysIsOnePerson() {
         // Must keep agreeing with `SmsAddresses.normalize` on the phone.
-        #expect(SmsAddressMatch.same("+61 401 660 454", "0401660454"))
-        #expect(SmsAddressMatch.same("+61401660454", "401660454"))
+        #expect(SmsAddressMatch.same("+61 491 570 006", "0491570006"))
+        #expect(SmsAddressMatch.same("+61491570006", "491570006"))
     }
 
     @Test func differentPeopleStayDifferent() {
-        #expect(!SmsAddressMatch.same("+61401660454", "+61401660455"))
+        #expect(!SmsAddressMatch.same("+61491570006", "+61401660455"))
     }
 
     @Test func shortCodesAreNotTruncatedIntoEachOther() {
@@ -628,6 +628,96 @@ struct SmsAddressMatchTests {
     @Test func alphanumericSendersSurvive() {
         #expect(SmsAddressMatch.normalize("amaysim") == "amaysim")
         #expect(SmsAddressMatch.same("amaysim", "AMAYSIM"))
+    }
+
+    // MARK: - Messages against notifications
+
+    @Test func chatsAndAppNoiseGoIntoDifferentLists() {
+        // The window draws these as two tabs. One combined list is dominated by whichever
+        // arrives more often, and it is never the messages.
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "a", pkg: "com.whatsapp", title: "Sam",
+                                    category: "msg", senderName: "Sam"))
+        log.ingest(makeNotification(key: "b", pkg: "com.kfc", appLabel: "KFC",
+                                    title: "The irresistible original",
+                                    body: "Smash 6 pieces of OG gold.",
+                                    category: "promo", actions: []))
+        log.ingest(makeSms())
+
+        #expect(log.conversationsByRecency.count == 2)
+        #expect(log.alertsByRecency.count == 1)
+        #expect(log.alertsByRecency.first?.pkg == "com.kfc")
+        #expect(log.conversationsByRecency.allSatisfy { $0.isChat })
+    }
+
+    @Test func aPromotionThatClaimsToBeAMessageIsNotOne() {
+        // Observed in the wild: a food-delivery promo carrying a `msg` category and a
+        // conversation title, which the *grouping* honours — so it gets a row of its own —
+        // and which put it in the inbox beside actual people. No sender, no reply button.
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "a", pkg: "com.dd.doordash", appLabel: "DoorDash",
+                                    title: "Popular nearby",
+                                    body: "KFC is getting lots of orders near you.",
+                                    category: "msg",
+                                    conversationTitle: "Popular nearby",
+                                    actions: []))
+        #expect(log.conversationsByRecency.isEmpty)
+        #expect(log.alertsByRecency.count == 1)
+    }
+
+    @Test func oneQuietMessageDoesNotDemoteAChat() {
+        // Chat apps post plenty of notifications with no reply action — a photo, a call
+        // summary, "message deleted". A thread does not stop being a conversation for it.
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "a", pkg: "com.whatsapp",
+                                    conversationTitle: "Family"))
+        log.ingest(makeNotification(key: "b", pkg: "com.whatsapp", body: "📷 1 photo",
+                                    category: nil, conversationTitle: "Family",
+                                    actions: []))
+        #expect(log.conversationsByRecency.count == 1)
+        #expect(log.alertsByRecency.isEmpty)
+    }
+
+    @Test func restoredThreadsSortThemselvesFromTheReplyActionOnDisk() {
+        // An archive written before the flag existed. The retained reply action is the
+        // same evidence a live notification carries, so the inbox is right at launch
+        // rather than after the next message arrives.
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "a", pkg: "com.whatsapp", senderName: "Sam"))
+        log.ingest(makeNotification(key: "b", pkg: "com.dhl", title: "Delivered",
+                                    category: "msg", conversationTitle: "Delivered",
+                                    actions: []))
+        log.forgetConversationFlagsForTesting()
+        log.normalizeAfterRestore()
+
+        #expect(log.conversationsByRecency.count == 1)
+        #expect(log.conversationsByRecency.first?.pkg == "com.whatsapp")
+        #expect(log.alertsByRecency.count == 1)
+        #expect(log.alertsByRecency.first?.pkg == "com.dhl")
+    }
+
+    @Test func theTwoUnreadCountsAddUpToTheOldOne() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "a", pkg: "com.whatsapp", category: "msg"))
+        log.ingest(makeNotification(key: "b", pkg: "com.kfc", title: "Deal",
+                                    category: "promo", actions: []))
+        log.ingest(makeNotification(key: "c", pkg: "com.dhl", title: "Delivered",
+                                    category: "status", actions: []))
+
+        #expect(log.conversationUnread == 1)
+        #expect(log.alertUnread == 2)
+        #expect(log.conversationUnread + log.alertUnread == log.totalUnread)
+    }
+
+    @Test func anythingWithAReplyButtonIsAConversation() {
+        // The line is exactly the one `ConversationKey.init` already drew: an app that
+        // offers a reply is talking *with* someone, whatever its category says.
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "a", pkg: "com.slack", title: "deploys",
+                                    category: nil,
+                                    actions: [NotifAction(id: 0, label: "Reply", isReply: true)]))
+        #expect(log.conversationsByRecency.count == 1)
+        #expect(log.alertsByRecency.isEmpty)
     }
 }
 

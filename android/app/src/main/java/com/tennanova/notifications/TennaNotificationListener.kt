@@ -2,6 +2,7 @@ package com.tennanova.notifications
 
 import android.app.Notification
 import android.app.PendingIntent
+import android.app.Person
 import android.content.Intent
 import android.net.ConnectivityManager
 import android.net.Network
@@ -17,6 +18,14 @@ import android.service.notification.StatusBarNotification
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.RemoteInput
+import com.tennanova.calls.CallAction
+import com.tennanova.calls.CallDirection
+import com.tennanova.calls.CallIntents
+import com.tennanova.calls.CallMonitor
+import com.tennanova.calls.CallSignal
+import com.tennanova.calls.CallSnapshot
+import com.tennanova.calls.CallState
+import com.tennanova.core.CallAccessStatus
 import com.tennanova.core.SmsAccessStatus
 import com.tennanova.core.SmsMessageWire
 import com.tennanova.core.SmsThreadWire
@@ -74,6 +83,12 @@ class TennaNotificationListener : NotificationListenerService() {
     /** Reply/action plumbing for notifications currently on screen, keyed by SBN key. */
     private val actionMap = RetainedActions<List<Notification.Action>>()
     private val sms by lazy { SmsMirror(this) }
+    /**
+     * Live calls, and the intents that answer them. Fed from the notification stream
+     * rather than from a telephony API, which is what makes it cover WhatsApp and Signal
+     * calls as well as cellular ones — see [CallMonitor].
+     */
+    private val calls by lazy { CallMonitor(this) }
     /** Resolved once: it cannot change without the user changing a system setting. */
     private val defaultSmsPackage: String? by lazy {
         runCatching { android.provider.Telephony.Sms.getDefaultSmsPackage(this) }.getOrNull()
@@ -342,8 +357,10 @@ class TennaNotificationListener : NotificationListenerService() {
                 battery = battery,
                 pairingToken = settings.pairingToken,
                 deviceToken = settings.deviceToken,
-                extraCapabilities = if (smsAvailable()) listOf(Proto.SMS_CAPABILITY)
-                                    else emptyList()
+                extraCapabilities = buildList {
+                    if (smsAvailable()) add(Proto.SMS_CAPABILITY)
+                    if (settings.callsEnabled) add(Proto.CALL_CAPABILITY)
+                }
             )
         )
     }
@@ -374,6 +391,7 @@ class TennaNotificationListener : NotificationListenerService() {
                 // Populate the Mac and rebuild action mappings only after authentication.
                 activeNotifications?.forEach { handlePosted(it, resync = true) }
                 startSmsMirror()
+                publishCallStatus()
                 // After the replay, and not before: the replay is what repopulates the
                 // action map for everything still on the phone's shade. Anything the user
                 // cleared before this service last started is genuinely unreplyable, and
@@ -426,6 +444,22 @@ class TennaNotificationListener : NotificationListenerService() {
                     body = msg.optString("body"),
                     clientId = msg.optString("clientId")
                 )
+            }
+
+            "call.action" -> {
+                val id = msg.optString("id")
+                val clientId = msg.optString("clientId").ifEmpty { null }
+                val action = CallAction.parse(msg.optString("action"))
+                if (action == null) {
+                    Log.w(TAG, "unknown call action: ${msg.optString("action")}")
+                } else {
+                    val error = calls.perform(id, action)
+                    if (error != null) Log.w(TAG, "call ${action.wire} failed: $error")
+                    socket?.send(
+                        Messages.callActionResult(clientId, id, action, error == null, error)
+                    )
+                    publishCallStatus()
+                }
             }
 
             "notif.action" -> {
@@ -506,18 +540,33 @@ class TennaNotificationListener : NotificationListenerService() {
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification) {
+        // Withdrawn *before* the authentication check, because a call the phone is no
+        // longer showing is a call that has ended whether or not a Mac is listening, and
+        // leaving it in the monitor would let a later `call.action` fire a dead intent.
+        val ended = calls.onRemoved(sbn.key)
+        if (!authenticated) return
+        if (ended != null) {
+            socket?.send(Messages.callState(ended, resync = false))
+            publishCallStatus()
+            return
+        }
         // The actions deliberately survive this. See [RetainedActions] — a cancelled
         // notification does not cancel its reply PendingIntent, and messaging apps
         // withdraw their notification the moment the chat is read on the phone.
-        if (authenticated) socket?.send(Messages.notifRemoved(sbn.key))
+        socket?.send(Messages.notifRemoved(sbn.key))
     }
 
     private fun handlePosted(sbn: StatusBarNotification, resync: Boolean) {
         if (!authenticated) return
-        if (!shouldMirror(sbn)) return
 
         val n = sbn.notification
         val extras: Bundle = n.extras
+
+        // Calls leave here and never enter the notification stream. They are a different
+        // thing on the Mac — a ringing card with Answer and Decline, not a chat row that
+        // can never be replied to — and mirroring both would show every call twice.
+        if (settings.callsEnabled && mirrorCall(sbn, n, extras, resync)) return
+        if (!shouldMirror(sbn)) return
 
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
         val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
@@ -553,6 +602,128 @@ class TennaNotificationListener : NotificationListenerService() {
                 resync = resync,
                 actions = actions
             )
+        )
+    }
+
+    // MARK: - Calls
+
+    /**
+     * Sends a call to the Mac, and answers whether this notification was one at all.
+     *
+     * True means the caller must stop: a call notification is *not* also mirrored as a
+     * notification. Today those are dropped outright — `shouldMirror` refuses anything
+     * ongoing, which every incoming call is — so nothing that used to reach the Mac stops
+     * reaching it here.
+     */
+    private fun mirrorCall(
+        sbn: StatusBarNotification,
+        n: Notification,
+        extras: Bundle,
+        resync: Boolean
+    ): Boolean {
+        if (sbn.packageName == packageName) return false
+        // Group summaries are the single biggest source of duplicates for notifications,
+        // and a summary that inherits its group's `call` category would be a phantom call
+        // ringing beside the real one.
+        if (n.flags and Notification.FLAG_GROUP_SUMMARY != 0) return false
+        // A muted app stays muted. Nothing in the app mutes one today, but the setting is
+        // the user's word about that package and a call is not an exception to it.
+        if (sbn.packageName in settings.mutedPackages) return false
+
+        val answer = extras.getParcelable(
+            Notification.EXTRA_ANSWER_INTENT, PendingIntent::class.java
+        )
+        val decline = extras.getParcelable(
+            Notification.EXTRA_DECLINE_INTENT, PendingIntent::class.java
+        )
+        val hangUp = extras.getParcelable(
+            Notification.EXTRA_HANG_UP_INTENT, PendingIntent::class.java
+        )
+        val state = CallSignal.classify(
+            category = n.category,
+            callType = if (extras.containsKey(Notification.EXTRA_CALL_TYPE)) {
+                extras.getInt(Notification.EXTRA_CALL_TYPE)
+            } else null,
+            hasAnswerIntent = answer != null,
+            hasHangUpIntent = hangUp != null,
+            isOngoing = n.flags and Notification.FLAG_ONGOING_EVENT != 0
+        ) ?: return false
+
+        val person = extras.getParcelable(Notification.EXTRA_CALL_PERSON, Person::class.java)
+        val number = CallSignal.numberFrom(person?.uri)
+
+        // The dialer's own buttons — "Message", "Remind me". Answer and decline are not
+        // among them; those are resolved by the monitor. Retained under the same key the
+        // notification stream uses, so the Mac fires one with the existing `notif.action`
+        // and no second action channel has to exist.
+        val actions = mutableListOf<NotifAction>()
+        n.actions?.forEachIndexed { index, action ->
+            actions.add(
+                NotifAction(
+                    index,
+                    action.title?.toString() ?: "Action",
+                    action.remoteInputs?.isNotEmpty() == true
+                )
+            )
+        }
+        n.actions?.let { actionMap.put(sbn.key, it.toList()) }
+
+        val snapshot = CallSnapshot(
+            id = sbn.key,
+            state = state,
+            // Replaced by the monitor, which is the only thing that knows how this call
+            // was first seen and therefore which way it was going.
+            direction = CallDirection.INCOMING,
+            pkg = sbn.packageName,
+            appLabel = appLabel(sbn.packageName),
+            displayName = CallSignal.displayName(
+                personName = person?.name?.toString(),
+                title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
+                number = number
+            ),
+            number = number,
+            isVideo = extras.getBoolean(Notification.EXTRA_CALL_IS_VIDEO, false),
+            whenMs = if (n.`when` > 0) n.`when` else System.currentTimeMillis(),
+            canAnswer = false,
+            canDecline = false,
+            canHangUp = false,
+            iconHash = cacheIcon(sbn.packageName),
+            avatarHash = cacheCallerPhoto(person, n),
+            actions = actions
+        )
+
+        val resolved = calls.onPosted(snapshot, CallIntents(answer, decline, hangUp))
+        socket?.send(Messages.callState(resolved, resync))
+        publishCallStatus()
+        Log.i(TAG, "call ${state.wire} from ${resolved.displayName ?: "unknown"} " +
+            "(${resolved.appLabel}); answerable=${resolved.canAnswer}")
+        return true
+    }
+
+    /**
+     * The caller's photo. `CallStyle` names the person outright; everything else puts the
+     * same picture in the large icon, which is where [cacheAvatar] looks for chats.
+     */
+    private fun cacheCallerPhoto(person: Person?, n: Notification): String? = try {
+        val drawable = person?.icon?.loadDrawable(this) ?: n.getLargeIcon()?.loadDrawable(this)
+        drawable?.let { cacheAsset(drawableToPng(it, AVATAR_PX)) }
+    } catch (e: Exception) {
+        Log.w(TAG, "no caller photo: ${e.message}")
+        null
+    }
+
+    /**
+     * `LIMITED` is the honest description of the common case: calls reach the Mac and most
+     * dialers put answer and decline intents in the notification, but a dialer that does
+     * not leaves nothing to press without the optional call-control grant.
+     */
+    private fun publishCallStatus() {
+        RuntimeStatusStore.updateCalls(
+            when {
+                !settings.callsEnabled -> CallAccessStatus.OFF
+                calls.hasCallControl() -> CallAccessStatus.READY
+                else -> CallAccessStatus.LIMITED
+            }
         )
     }
 

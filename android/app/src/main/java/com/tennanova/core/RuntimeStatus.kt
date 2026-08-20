@@ -44,6 +44,22 @@ enum class SmsAccessStatus {
     ERROR
 }
 
+/**
+ * How far call mirroring has got.
+ *
+ * `LIMITED` is the state that matters and the reason this is not a boolean. Calls reach
+ * the Mac with no permission at all, and most dialers put answer and decline intents in
+ * their notification, so the feature is genuinely working — but a dialer that does not
+ * will have no button to press, and only the optional `ANSWER_PHONE_CALLS` grant can
+ * rescue that. Saying "on" would overpromise and "needs access" would nag about something
+ * already doing its job.
+ */
+enum class CallAccessStatus {
+    OFF,
+    LIMITED,
+    READY
+}
+
 data class RuntimeSnapshot(
     val connection: ConnectionStatus = ConnectionStatus.UNPAIRED,
     val transport: ConnectionTransport = ConnectionTransport.NONE,
@@ -53,6 +69,7 @@ data class RuntimeSnapshot(
     val clipboard: ClipboardAccessStatus = ClipboardAccessStatus.NEEDS_ACCESSIBILITY,
     val sms: SmsAccessStatus = SmsAccessStatus.OFF,
     val smsThreadCount: Int = 0,
+    val calls: CallAccessStatus = CallAccessStatus.OFF,
     val peerSupportsImages: Boolean = false,
     val lastTransfer: String? = null,
     val connectionError: String? = null,
@@ -91,6 +108,10 @@ object RuntimeStatusStore {
         mutable.update {
             it.copy(sms = status, smsThreadCount = threadCount ?: it.smsThreadCount)
         }
+    }
+
+    fun updateCalls(status: CallAccessStatus) {
+        mutable.update { it.copy(calls = status) }
     }
 
     fun updateConnection(status: ConnectionStatus, error: String? = null) {

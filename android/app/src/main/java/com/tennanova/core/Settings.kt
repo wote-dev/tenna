@@ -166,6 +166,32 @@ class Settings(context: Context) {
         get() = prefs.getBoolean(KEY_SMS_ENABLED, false)
         set(v) = prefs.edit().putBoolean(KEY_SMS_ENABLED, v).apply()
 
+    /**
+     * Whether calls are shown on the Mac.
+     *
+     * On by default, and the odd one out among these toggles for a reason: reading a call
+     * out of a notification needs no permission the app does not already hold, and the
+     * notifications it reads are ones this build used to *drop* on the floor. Turning it on
+     * takes nothing new from the user. The optional `ANSWER_PHONE_CALLS` grant is a
+     * separate question and lives in [Settings] not at all — it is asked for by the
+     * dashboard and read back from the system, which is the only honest source for it.
+     */
+    var callsEnabled: Boolean
+        get() = prefs.getBoolean(KEY_CALLS_ENABLED, true)
+        set(v) = prefs.edit().putBoolean(KEY_CALLS_ENABLED, v).apply()
+
+    /**
+     * Whether the call-control permission has ever been asked for.
+     *
+     * `shouldShowRequestPermissionRationale` returns false in two opposite situations — the
+     * request has never been made, and the user has refused it permanently — and only this
+     * distinguishes them. Without it the "Allow call access" button would open Settings
+     * before ever showing the system dialog.
+     */
+    var callControlAsked: Boolean
+        get() = prefs.getBoolean(KEY_CALL_CONTROL_ASKED, false)
+        set(v) = prefs.edit().putBoolean(KEY_CALL_CONTROL_ASKED, v).apply()
+
     /** Packages the user has muted. */
     var mutedPackages: Set<String>
         get() = prefs.getStringSet(KEY_MUTED, emptySet()) ?: emptySet()
@@ -225,5 +251,7 @@ class Settings(context: Context) {
         const val KEY_RELAY_ROOM = "relayRoom"
         const val KEY_MUTED = "mutedPackages"
         const val KEY_SMS_ENABLED = "smsEnabled"
+        const val KEY_CALLS_ENABLED = "callsEnabled"
+        const val KEY_CALL_CONTROL_ASKED = "callControlAsked"
     }
 }

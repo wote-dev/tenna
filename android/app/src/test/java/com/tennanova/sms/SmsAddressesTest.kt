@@ -8,7 +8,7 @@ import org.junit.Test
 class SmsAddressesTest {
 
     @Test fun `one person written four ways is one conversation`() {
-        val forms = listOf("+61 401 660 454", "0401660454", "401660454", "+61401660454")
+        val forms = listOf("+61 491 570 006", "0491570006", "491570006", "+61491570006")
         val normalized = forms.map { SmsAddresses.normalize(it) }.toSet()
 
         // Country code and trunk prefix are exactly the parts that differ between
@@ -29,9 +29,9 @@ class SmsAddressesTest {
     }
 
     @Test fun `a contact name wins over the raw number`() {
-        assertEquals("Sam", SmsAddresses.display("Sam", "+61401660454"))
-        assertEquals("+61401660454", SmsAddresses.display(null, "+61401660454"))
-        assertEquals("+61401660454", SmsAddresses.display("   ", "+61401660454"))
+        assertEquals("Sam", SmsAddresses.display("Sam", "+61491570006"))
+        assertEquals("+61491570006", SmsAddresses.display(null, "+61491570006"))
+        assertEquals("+61491570006", SmsAddresses.display("   ", "+61491570006"))
     }
 
     @Test fun `an unknown sender still gets a name`() {
@@ -45,8 +45,8 @@ class SmsAddressesTest {
     }
 
     @Test fun `real destinations are accepted in any format`() {
-        assertTrue(SmsAddresses.isSendable("+61 401 660 454"))
-        assertTrue(SmsAddresses.isSendable("0401660454"))
+        assertTrue(SmsAddresses.isSendable("+61 491 570 006"))
+        assertTrue(SmsAddresses.isSendable("0491570006"))
         assertTrue(SmsAddresses.isSendable("amaysim"))
         assertTrue(SmsAddresses.isSendable("19876"))
     }

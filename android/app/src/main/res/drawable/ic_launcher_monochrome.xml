@@ -1,10 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  The themed-icon mark: the artwork's ribbon reduced to one stroked S — two 270° arcs of
+  equal radius meeting at the centre, round-capped, so the terminals read the same way the
+  gradient ribbon's do. Drawn as a stroke rather than an outlined fill because a single
+  weight is what survives being tinted flat and shrunk to 48px.
+
+  Sized to the 66dp guaranteed-visible circle: the arcs plus half the stroke reach 31.4dp
+  from the 54,54 centre at their far corner, just inside that circle's 33dp radius.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
     <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M36,34 H72 C78,34 82,38 82,44 C82,50 78,54 72,54 H62 C60,54 59,55 59,57 V74 C59,80 55,83 50,83 C45,83 41,80 41,74 V57 C41,55 40,54 38,54 H36 C30,54 26,50 26,44 C26,38 30,34 36,34 Z" />
+        android:fillColor="#00000000"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="10"
+        android:strokeLineCap="round"
+        android:pathData="M65,43 A11,11 0 1 0 54,54 A11,11 0 1 1 43,65" />
 </vector>

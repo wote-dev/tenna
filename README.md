@@ -1,154 +1,471 @@
+<div align="center">
+
+<img src="web/media/icon-square.png" width="120" alt="Tennanova">
+
 # Tennanova
 
-Android notification mirroring and clipboard sync for macOS. Personal, local-only,
-no cloud account, no telemetry.
+**Your Android phone's notifications, messages, calls and clipboard, on your Mac.**
+Local-only. No account, no cloud service, no telemetry.
 
-Two apps talk directly to each other over one TLS WebSocket on your LAN or through an
-automatic local USB tunnel:
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)
+![Android 13+](https://img.shields.io/badge/Android-13%2B-3ddc84)
+
+</div>
+
+Two apps that talk directly to each other over a single pinned TLS WebSocket — on your LAN,
+through a USB tunnel, or, when the network refuses to carry traffic between its own clients,
+through a relay that can only see ciphertext.
 
 ```
-macOS (SwiftUI menu bar)  ◀── TLS/WSS ──▶  Android (Compose)
-  NWListener + WebSocket                     NotificationListenerService
-  Bonjour _tennanova._tcp                      hosts the socket
-  UNUserNotificationCenter                   Accessibility clipboard capture
-  bundled adb reverse                        public ClipboardManager APIs
-  NSPasteboard                               ClipboardWriter
+macOS (SwiftUI, menu bar + window)  ◀── TLS/WSS ──▶  Android (Compose)
+  NWListener hosts the socket                          NotificationListenerService
+  Bonjour _tennanova._tcp                              SMS provider + SmsManager
+  UNUserNotificationCenter                             CallStyle notification intents
+  NSPasteboard                                         ClipboardManager
+  bundled adb reverse                                  hosts nothing; always the client
 ```
+
+---
 
 ## What it does
 
-- Android notifications appear in macOS Notification Center
-- Reply from the Mac keyboard (via the notification's own `RemoteInput`)
-- Invoke notification action buttons from the Mac
-- Dismissing on one device dismisses on the other
-- Clipboard text and one real image at a time sync both ways, including image files copied in Finder
+- **Notifications** from the phone appear in macOS Notification Center and in the app window.
+- **Reply from the Mac keyboard**, using the notification's own reply field — so the message
+  goes out through WhatsApp, Signal, Telegram or whatever posted it.
+- **Action buttons** from the notification work from the Mac too.
+- **Dismissing on one device dismisses on the other.**
+- **Real SMS conversations** with full thread history, and sending to any number.
+- **Calls ring on the Mac** — answer, decline and hang up from there. Cellular calls *and*
+  app calls like WhatsApp and Signal, through one code path.
+- **Clipboard sync both ways**, text and one image at a time, including image files copied
+  in Finder.
+- A Mac window that keeps **Messages** and **Notifications** in separate lists, with a Calls
+  pane of its own.
 
-Deliberately **not** included: screen mirroring, webcam, calls, SMS threads, or
-generic/multi-file transfer.
+### What it deliberately doesn't do
 
-## Requirements
+Each of these is an explicit decision, not a backlog item:
+
+| Not included | Why |
+|---|---|
+| **Call audio** | Android does not let any third-party app capture voice-call audio. `CAPTURE_AUDIO_OUTPUT` is privileged, and the accessibility workaround was closed in 2022. The Mac is the *control surface*; the sound stays on the phone or its headset. Every screen offering a call button says so. |
+| **Mute during a call** | Needs an `InCallService`, which needs the default-dialer role. A button that silently does nothing is worse than no button. |
+| **Screen mirroring, webcam** | Out of scope. Different problem, different app. |
+| **Generic / multi-file transfer** | The clipboard carries one image at a time on purpose. A file manager is a different product. |
+| **MMS** | The SMS provider gives text threads without the app being the default SMS app. MMS does not. Out of scope rather than half-supported. |
+
+---
+
+## Try it
+
+Nothing here is downloadable as a binary, and that is not laziness. The Mac app is signed
+**ad-hoc** — there is no Apple Developer account behind this project — so a `.app` you
+downloaded would be blocked by Gatekeeper on arrival. Building it yourself takes about two
+minutes and is the supported path.
+
+### What you need
 
 | | |
 |---|---|
-| macOS | 14+, Apple silicon |
-| Android | 13+ (minSdk 33) |
-| Build | Swift 6.2 (Command Line Tools is enough — no Xcode), JDK 17+, Android SDK |
+| **macOS** | 14 or newer, Apple silicon |
+| **Android** | 13 or newer (minSdk 33), sideloading enabled |
+| **Swift** | 6.x — the **Command Line Tools are enough**, full Xcode is not required |
+| **JDK** | 17 or newer |
+| **Android SDK** | with `platform-tools` (for `adb`) |
 
-## Building
+The Swift toolchain, if you have neither Xcode nor the Command Line Tools:
 
-**Mac** — produces a signed `.app` bundle and packages the installed Android SDK `adb`
-for automatic USB tunnelling. `UNUserNotificationCenter` refuses to work from a bare
-executable, so use the script rather than `swift run`:
+```bash
+xcode-select --install
+```
+
+Gradle needs `JAVA_HOME` pointed at a JDK explicitly. Which line works depends on where your
+JDK came from — Homebrew's `openjdk` is keg-only, so `/usr/libexec/java_home` cannot see it:
+
+```bash
+export JAVA_HOME="$(brew --prefix openjdk@21)/libexec/openjdk.jdk/Contents/Home"
+```
+
+```bash
+export JAVA_HOME="/Applications/Android Studio.app/Contents/jbr/Contents/Home"
+```
+
+```bash
+export JAVA_HOME="$(/usr/libexec/java_home -v 17)"
+```
+
+Then the SDK, and a check that both are real before you build:
+
+```bash
+export ANDROID_HOME="$HOME/Library/Android/sdk"
+```
+
+```bash
+"$JAVA_HOME/bin/java" -version && ls "$ANDROID_HOME/platform-tools/adb"
+```
+
+Put whichever pair works into your shell profile so they stick.
+
+`android/local.properties` is gitignored, so a fresh clone has to supply the SDK path — either
+by exporting `ANDROID_HOME` as above, or by writing the file yourself:
+
+```bash
+echo "sdk.dir=$HOME/Library/Android/sdk" > android/local.properties
+```
+
+### 1. Build and run the Mac app
 
 ```bash
 cd mac && ./make-app.sh && open build/TennaNova.app
 ```
 
-**Android**:
+Use the script rather than `swift run`. `UNUserNotificationCenter` refuses to work from a
+bare executable: it needs a real bundle with a bundle identifier, and it needs a signature.
+`make-app.sh` assembles the `.app`, signs it ad-hoc, bundles your SDK's `adb` for the USB
+tunnel, and re-registers it with Launch Services so Notification Center picks up its icon.
+
+The app appears in the Dock and in the menu bar, and shows a pairing QR.
+
+### 2. Build and install the Android app
+
+Enable **Developer options → USB debugging** on the phone, plug it in, and accept the
+"Allow USB debugging?" prompt. Then:
 
 ```bash
-cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ./gradlew installDebug
+cd android && ./gradlew installDebug
 ```
 
-**Tests**:
+### 3. Pair
 
-```bash
-cd android && JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home ./gradlew testDebugUnitTest
-cd ../mac && ./test.sh
-```
+1. On the phone, tap **Scan pairing code** and scan the QR from the Mac. This uses Google's
+   Code Scanner, so it needs no camera permission of its own.
+2. The phone opens the system **notification access** screen if that grant is missing.
+3. Then the system **Accessibility** screen, for phone → Mac clipboard capture.
 
-## Setup
+Returning from each Settings screen continues setup automatically. Both are one-time grants.
+There is no Shizuku, no daemon, no wireless-debugging pairing, no privileged bridge, and
+nothing to redo after a reboot.
 
-1. Launch the Mac app — it appears in the menu bar and shows a pairing QR.
-2. Tap **Scan pairing code** on Android. Google Code Scanner needs no camera permission.
-3. Android opens the system **notification access** confirmation if it is still missing.
-4. Android then opens the system **Accessibility** confirmation for clipboard sync if it is
-   still missing. Returning from each Settings screen automatically continues setup.
+Two things on the phone's dashboard are switches rather than setup steps, because the app is
+wholly useful without either. **Text messages** is off until you turn it on, and asks for SMS
+and contacts permissions at that point. **Calls** is already on and asks for nothing — a call
+is read from the notification your phone already shows for it.
 
-Those are one-time Android grants. There is no Shizuku app, daemon, wireless-debugging
-pairing, privileged bridge, or post-reboot privilege setup.
+<details>
+<summary><b>Pairing from the terminal instead of scanning</b></summary>
 
-### Hotspots
-
-Either direction works, with no cable and no re-pairing:
-
-- **Phone hotspot, Mac joins it.** The Mac picks up an address on the tether subnet that
-  neither device has seen before.
-- **Mac Internet Sharing, phone joins it.** That Wi-Fi has no internet, so Android keeps
-  cellular as its default network.
-
-Three things make that work. The Mac advertises *every* address it answers on — in the QR
-and again on every connection — so the phone's list follows the Mac between networks. The
-phone binds each attempt to the network whose own subnet contains the address, which is
-what reaches a Wi-Fi with no internet. And when nothing known answers, the phone probes its
-directly-connected subnets for the port, which is the only way to find a Mac that has just
-joined the hotspot. mDNS cannot help here: it runs on the phone's default network, which
-stays cellular while tethering.
-
-The first connection on a new hotspot costs the ~3 s probe; after that the address is
-remembered. The menu bar lists the addresses currently being advertised.
-
-### If the phone can't reach the Mac
-
-This network (`192.168.210.0/24`) has **AP client isolation** switched on, so the router
-blocks device-to-device traffic. Leave the authorized phone connected by USB: the Mac app
-detects exactly one connected Tennanova phone and maintains
-`adb reverse tcp:18777 tcp:18777` automatically, including after detach/reattach.
-
-The QR advertises the secured USB loopback endpoint as well as the LAN addresses. Android
-tries USB first and falls back to LAN. USB debugging must already be enabled and this Mac
-must be authorized on the phone; that is normally already true when personally sideloading
-the app. For untethered use, disable AP/client isolation or use a hotspot.
-
-### Pairing from the terminal
-
-Faster than retyping base64 on a phone keyboard. Note the nested quotes — the *device*
-shell strips unprotected double quotes and the JSON arrives malformed:
+Faster than retyping base64 on a phone keyboard. Note the nested quotes — the *device* shell
+strips unprotected double quotes and the JSON arrives malformed:
 
 ```bash
 adb shell am start -n com.tennanova/.ui.MainActivity --es pair "'$(cat payload.json)'"
 ```
 
-## How phone → Mac clipboard capture works
+</details>
 
-Android does not grant an Accessibility service a direct clipboard exemption. Tennanova's
-narrowly scoped service listens for copy-related event metadata without retrieving the UI
-tree. After an explicit copy action, and only while an authenticated Mac session exists, it
-briefly adds a transparent 1×1 non-touchable Accessibility overlay. That gives Tennanova the
-application focus Android requires for one `ClipboardManager.primaryClip` read; the overlay
-is removed immediately.
+### Running the tests
 
-- Text, URLs and OTPs use the normal text clip path.
-- Single images use the clip's normal `content://` URI and `ContentResolver`; payload size and
-  SHA-256 are verified before sending.
-- Content fingerprints and sequence numbers suppress Mac ↔ phone echoes.
-- **Share → Tennanova** is the fallback for apps whose copy action exposes no usable event.
-- Capture only runs while authenticated and remains unavailable while the phone is locked.
-- Mac → Android clipboard writes need no Accessibility access.
+Swift Testing, on the Mac side:
 
-This is intended for a personally sideloaded app. Distribution through Google Play would
-need a separate Accessibility policy review and clear in-app disclosure.
+```bash
+cd mac && ./test.sh
+```
+
+JUnit, on the Android side:
+
+```bash
+cd android && ./gradlew testDebugUnitTest
+```
+
+`mac/test.sh` exists because the standalone Command Line Tools install `Testing.framework`
+outside SwiftPM's default search path, so a bare `swift test` cannot find it. With full Xcode
+installed, plain `swift test` works.
+
+> Avoid `./gradlew connectedDebugAndroidTest` on a phone you have paired with — it uninstalls
+> the app, which costs you the pairing.
+
+---
+
+## How it works
+
+Short version of each mechanism, with the constraint that forced it. The wire format itself —
+every message, every field, every edge case — lives in **[protocol/PROTOCOL.md](protocol/PROTOCOL.md)**,
+which is the contract both apps are written against.
+
+### The connection ladder
+
+The Mac is always the server; the phone is always the client. The phone roams, the Mac
+doesn't, and inverting that would mean the Mac chasing an address that changes every time the
+phone leaves the house.
+
+The phone tries, in order:
+
+1. **USB** — `127.0.0.1:18777`, against an `adb reverse` tunnel the Mac maintains. 1s timeout.
+2. **Every LAN address the Mac answers on**, best first. 3s timeout each.
+3. **The relay**, last. 20s timeout, because the relay has to hand the stream to the Mac.
+
+The order is the point: a Mac on the same desk is never reached by way of a server on another
+continent.
+
+The Mac advertises *all* of its addresses rather than one, and re-advertises whenever the list
+changes mid-session. One address is not enough — on a hotspot the useful address is on a
+tether or `bridge` interface, and neither side can tell in advance which network is live.
+Timeouts are short precisely because most of the list will be stale.
+
+The phone also **binds each attempt to the specific network** whose subnet contains the target.
+Without that, a Wi-Fi with no internet is unreachable whenever Android keeps cellular or a VPN
+as the default route — which is exactly the case when your Mac is sharing a connection.
+
+### Pairing and trust
+
+On first launch the Mac generates a self-signed **RSA 2048** certificate and keeps the PKCS#12
+in the login Keychain. The QR carries the Mac's addresses, a SHA-256 of its public key, and a
+one-time pairing token. The phone pins that key with a custom `X509TrustManager` — it trusts
+that one key and nothing else — sends the token, and gets back a long-lived device token for
+every reconnect afterwards. A pin mismatch is fatal by design and is surfaced, not retried.
+
+Two findings worth keeping, because they cost real time:
+
+- **RSA, not EC.** `SecPKCS12Import` *crashes* — uncaught `NSException`, not an error return —
+  on EC keys on macOS 27. Verified experimentally.
+- **The pin hashes the PKCS#1 `RSAPublicKey`**, because that is what Apple's
+  `SecKeyCopyExternalRepresentation` returns — *not* the X.509 SubjectPublicKeyInfo that Java's
+  `getEncoded()` gives. `CertPinning.kt` unwraps the SPKI to match, and the two sides were
+  verified to produce byte-identical output.
+
+### Notifications, and replying to a conversation the phone has forgotten
+
+Messaging apps withdraw their notification the moment you read the chat on the phone. By the
+time you look at the Mac, most conversations have already been removed — but the reply is not
+gone with them. An Android reply `PendingIntent` stays live until the *posting app* cancels it,
+not when its notification is dismissed. So the phone keeps each notification's action list
+after removal and reports back what became of every reply it fires.
+
+### Calls
+
+A call is not read from a telephony API. It is read from the **notification** that every
+calling app must post for one. That single decision is what makes one code path cover the
+cellular dialer, WhatsApp, Signal and Telegram alike — and it costs no permission beyond the
+notification access the app already has.
+
+`Notification.EXTRA_CALL_TYPE` says whether a call is ringing or in progress, and the
+`CallStyle` answer / decline / hang-up `PendingIntent`s are what the Mac's buttons fire.
+Pressing one from the Mac does exactly what pressing it on the phone does. For a dialer that
+puts no buttons in its notification, the optional `ANSWER_PHONE_CALLS` grant lets
+`TelecomManager` stand in. Calls still ring on the Mac without it — which is why the phone
+reports that state as *limited* rather than as needing attention.
+
+Calls never enter the message list. A call has no transcript and cannot be replied to, so it
+gets a pane and a banner of its own.
+
+### SMS
+
+SMS is the one messaging surface Android actually opens to a third-party app. WhatsApp, Signal
+and the rest expose nothing but their notifications — no history, no way to start a
+conversation — so a Mac-side chat for those can only ever be notification-shaped. The SMS
+provider has no such limit: full thread history, and `SmsManager` sends to any number
+**without** the app being the default SMS app. Only writing to the provider and MMS need that
+role, and Tennanova does neither.
+
+Contact names are resolved **on the phone**, which already holds `READ_CONTACTS` for it. That
+is why there is no contacts protocol and no contact cache on the Mac.
+
+### Clipboard
+
+The two directions are not symmetric, and that asymmetry is the whole story.
+
+**Mac → phone is free.** Writing the clipboard needs no Android permission at all.
+
+**Phone → Mac needs the Accessibility grant**, because Android only lets the app that currently
+holds application focus read the clipboard — a foreground-only rule with no exemption for
+Accessibility services. Tennanova's service watches for copy-related event metadata *without*
+reading the UI tree; after an explicit copy, and only while an authenticated Mac session
+exists, it briefly takes the focus Android requires for exactly one read, then gives it back.
+Content fingerprints and sequence numbers on both ends stop a clip echoing back and forth.
+
+- Capture only runs while authenticated, and never while the phone is locked.
+- **Share → Tennanova** is the fallback for apps whose copy action exposes no usable signal.
+- Images travel as a `content://` stream; length and SHA-256 are verified before publishing.
+
+The full mechanism, including why the focus window has to be configured the way it is,
+is in [PROTOCOL.md](protocol/PROTOCOL.md#clipboard).
+
+> This is built for a personally sideloaded app. Distributing it through Google Play would
+> require a separate Accessibility policy review and prominent in-app disclosure.
+
+### The relay
+
+Public, hotel and corporate Wi-Fi very often run **AP client isolation**: every packet from one
+client to another is dropped at the access point. No LAN transport survives that, because the
+block is below the layer an app runs at — no amount of mDNS or subnet probing changes it. On
+one such network the Mac could see 45 neighbours in its ARP table, zero other Bonjour services,
+and not one open TCP port among them.
+
+Both devices can still reach the internet, so each dials *out* to a relay over `wss` on 443 and
+it forwards bytes between them.
+
+**The relay cannot see anything.** What it forwards is the phone's ordinary TLS session to the
+Mac — the same one, pinned to the same key, negotiated end to end *through* the pipe. The relay
+carries ciphertext it holds no key for. It can delay or drop a session; it cannot read one,
+forge one, or authenticate as either device. Nothing in it parses, stores or logs a payload
+byte. Neither app's protocol code even knows it exists: each end runs a local loopback pump.
+
+A room is named `base64url(sha256(secret))`. The **Mac** holds the secret and is the only party
+that can host the room; the **phone** is handed only the room id, so it can join but never host.
+Knowing a room id buys someone a TCP pipe to the Mac's listener — exactly the exposure of being
+on the same LAN — and the pinned certificate and pairing token still guard the session.
+
+Builds default to a relay at `tennanova-relay.fly.dev`. **Run your own** — `relay/` deploys to
+Fly, Railway, Render or a VPS behind Caddy:
+
+```bash
+defaults write com.tennanova.mac relayHost my-relay.example.com
+```
+
+Or stay LAN + USB only and never dial out at all:
+
+```bash
+defaults write com.tennanova.mac relayEnabled -bool NO
+```
+
+Serverless hosts will not work: a Tennanova session is meant to idle for hours, and
+Vercel/Lambda-style functions cap request duration. See **[relay/README.md](relay/README.md)**.
+
+---
+
+## Privacy and permissions
+
+Nothing needs an account. Nothing is uploaded. There is no analytics or crash-reporting SDK in
+either app, and the only network destinations are your own Mac and, if you leave it enabled,
+the relay — which carries ciphertext.
+
+**What the Android app asks for:**
+
+| Permission | What it enables | Optional? |
+|---|---|---|
+| Notification access | Everything: notifications, replies, and calls | Required |
+| Accessibility | Phone → Mac clipboard capture only | Optional — everything else works without it |
+| `READ_SMS` / `SEND_SMS` | SMS threads and sending | Optional — asked for only when you turn SMS on |
+| `READ_CONTACTS` | Resolving numbers to names on the phone | Optional, with SMS |
+| `ANSWER_PHONE_CALLS`, `READ_PHONE_STATE` | Answering a dialer whose notification carries no buttons | Optional — calls still ring without it |
+| `INTERNET`, `ACCESS_NETWORK_STATE` | The socket itself | Required |
+
+There is deliberately no `CAPTURE_AUDIO_OUTPUT` (privileged), no default-SMS-app role, and no
+default-dialer role.
+
+**What the Mac stores, and where:**
+
+| | |
+|---|---|
+| TLS identity (PKCS#12) | login Keychain |
+| Paired device, tokens, relay secret | `UserDefaults` for `com.tennanova.mac` |
+| Conversation history | `~/Library/Application Support/com.tennanova.mac/history.json` |
+| App icons | `~/Library/Caches/com.tennanova.mac/icons/` |
+
+Unpairing from either device forgets the phone and deletes the conversations that came with it.
+
+---
+
+## Troubleshooting
+
+**The phone can't reach the Mac at all.**
+Almost always **AP client isolation** — the router is dropping device-to-device traffic. Three
+ways out, in order of preference:
+
+1. **USB.** Leave the phone connected. The Mac detects a single connected Tennanova phone and
+   maintains `adb reverse tcp:18777 tcp:18777` automatically, including across detach and
+   reattach. USB debugging must be enabled and this Mac authorized on the phone — normally
+   already true if you sideloaded the app yourself.
+2. **The relay**, which is what it exists for.
+3. **Turn client isolation off** on the router, if it's yours.
+
+**Hotspots.** Both directions work, with no cable and no re-pairing — phone hotspot with the
+Mac joining it, or Mac Internet Sharing with the phone joining that. The first connection on a
+new hotspot costs a ~3s probe while the phone searches its directly-connected subnets for a Mac
+at an address nobody has seen before; after that the address is remembered. mDNS cannot help
+here, because it runs on the phone's default network, which stays cellular while tethering.
+
+**It connected before and now won't.** Check the menu bar: it lists the addresses currently
+being advertised. If the Mac has moved networks, the phone follows on its own — but a *pin
+mismatch* never retries, by design. That means the Mac's TLS identity changed (a new Keychain,
+a different Mac), and the fix is to unpair on both sides and scan a fresh QR.
+
+**Starting over.** Unpair from the Mac's device pane or its menu bar, or from the phone's
+dashboard. Either side mints a fresh pairing token and a new QR.
+
+**Logs.** The Mac:
+
+```bash
+log stream --predicate 'subsystem == "com.tennanova.mac"' --level debug
+```
+
+The phone:
+
+```bash
+adb logcat -s TennaNova:V TennaClipboard:V
+```
+
+---
+
+## Repo layout
+
+```
+protocol/PROTOCOL.md   the wire format — the contract; change both apps together
+mac/                   SwiftPM package, make-app.sh, test.sh
+android/               Gradle project
+relay/                 the blind byte pipe, and how to deploy your own
+web/                   the landing page (static, no build step)
+assets/icon/           icon masters — every app icon is generated from these
+tools/make-icons.sh    the generator
+```
+
+## Development
+
+`protocol/PROTOCOL.md` is the single source of truth for anything crossing the wire. Additive
+fields are fine within `v:1` and receivers must ignore unknown keys; changing what an existing
+field *means*, or adding a message the peer must understand to behave correctly, requires
+bumping the version. Both implementations change together.
+
+Regenerating every launcher icon, the macOS `.icns` and the web favicons from the two masters
+in `assets/icon/` — only needed when the artwork changes:
+
+```bash
+./tools/make-icons.sh
+```
+
+Previewing the landing page:
+
+```bash
+cd web && python3 -m http.server 8000
+```
+
+## Status
+
+Pre-1.0, and built for sideloading onto your own phone. It is used daily on real hardware, but
+it has been exercised on a small number of devices, so expect to meet a dialer or a launcher
+that behaves differently from the ones it has seen. Bug reports that name the phone, the
+Android version and the app involved are the useful kind.
+
+Good places to contribute: dialers and messaging apps whose notifications are shaped
+unexpectedly, network conditions the connection ladder doesn't handle, and anything in
+`PROTOCOL.md` that turns out to be wrong.
 
 ## Notes and known limits
 
-- macOS shows **Tennanova's** icon as the notification icon; the Android app's icon can
-  only be an attachment thumbnail. Same limitation as AirSync and LinkMyMac. Because that
-  thumbnail is the only place a card can name its app, it holds the app icon, and cards
-  read *contact → message* with no app label wedged in between. A group chat adds the
-  chat name as a subtitle. The sender's photo is still sent but is not displayed.
+- macOS shows **Tennanova's** icon on a notification; the Android app's own icon can only be an
+  attachment thumbnail. Same limitation as AirSync and LinkMyMac. Since that thumbnail is the
+  only place a card can name its app, it holds the app icon, and cards read *contact → message*
+  with no app label wedged in between. A group chat adds the chat name as a subtitle.
 - macOS has no callback for a user-*dismissed* notification, so dismissal is detected by
   polling `getDeliveredNotifications()` every 2s.
-- The Mac's TLS cert uses **RSA, not EC**: `SecPKCS12Import` *crashes* with an uncaught
-  `NSException` on EC keys on macOS 27. Verified experimentally, not a guess.
-- Pinning hashes the **PKCS#1 RSAPublicKey**, because that is what Apple's
-  `SecKeyCopyExternalRepresentation` returns — *not* the X.509 SubjectPublicKeyInfo that
-  Java's `getEncoded()` gives. `CertPinning.kt` unwraps the SPKI to match. Verified to
-  produce byte-identical output on both sides.
+- An incoming-call card cannot be a time-sensitive or critical alert — both need Apple
+  entitlements. It is an ordinary notification with a distinct sound, plus an in-window banner
+  and a menu bar item that changes while the phone rings.
+- The Mac's sidebar splits chats from app noise with the same test that groups them: a
+  notification with a sender, a chat title, a `msg` category or a reply button is a
+  conversation; everything transactional is one row per app under **Notifications**.
 
-## Layout
+## License
 
-```
-protocol/PROTOCOL.md   wire format — the contract, change both apps together
-mac/                   SwiftPM package + make-app.sh
-android/               Gradle project
-```
+MIT — see [LICENSE](LICENSE).

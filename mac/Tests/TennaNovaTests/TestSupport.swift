@@ -61,7 +61,7 @@ func withTemporaryArchive(_ body: (ConversationArchive) -> Void) {
 func makeSms(
     id: Int64 = 1,
     threadId: Int64 = 42,
-    address: String = "+61401660454",
+    address: String = "+61491570006",
     displayName: String? = "Sam",
     body: String = "are you close?",
     whenMs: Int64 = 1_700_000_000_000,
@@ -76,7 +76,7 @@ func makeSms(
 
 func makeSmsThread(
     id: Int64 = 42,
-    address: String = "+61401660454",
+    address: String = "+61491570006",
     displayName: String = "Sam",
     snippet: String = "are you close?",
     whenMs: Int64 = 1_700_000_000_000,
@@ -85,5 +85,29 @@ func makeSmsThread(
     SmsThreadSummary(
         id: id, address: address, displayName: displayName,
         snippet: snippet, when: whenMs, unread: unread
+    )
+}
+
+func makeCall(
+    id: String = "0|com.dialer|1|null|1000",
+    state: String = "ringing",
+    direction: String = "incoming",
+    pkg: String = "com.dialer",
+    appLabel: String = "Phone",
+    displayName: String? = "Sam",
+    number: String? = "+61491570006",
+    video: Bool = false,
+    whenMs: Int64 = 1_700_000_000_000,
+    canAnswer: Bool = true,
+    canDecline: Bool = true,
+    canHangUp: Bool = false,
+    resync: Bool? = nil,
+    actions: [NotifAction]? = nil
+) -> CallStateMessage {
+    CallStateMessage(
+        id: id, state: state, direction: direction, pkg: pkg, appLabel: appLabel,
+        displayName: displayName, number: number, video: video, when: whenMs,
+        canAnswer: canAnswer, canDecline: canDecline, canHangUp: canHangUp,
+        resync: resync, actions: actions
     )
 }

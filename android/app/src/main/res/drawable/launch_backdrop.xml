@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Matches Modifier.tennaBackdrop(). Android's <gradient> takes exactly three stops, which
+  is exactly what the backdrop has. angle=315 runs down-and-right, i.e. it starts at the
+  top-left corner, the same direction as the CSS 135deg the site uses.
+-->
+<shape xmlns:android="http://schemas.android.com/apk/res/android">
+    <gradient
+        android:type="linear"
+        android:angle="315"
+        android:startColor="@color/launch_gradient_start"
+        android:centerColor="@color/launch_gradient_mid"
+        android:endColor="@color/launch_gradient_end" />
+</shape>

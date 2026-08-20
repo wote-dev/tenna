@@ -13,6 +13,13 @@ struct MenuBarView: View {
 
             Divider()
 
+            // First, and above the connection detail: someone reaching for the menu bar
+            // while their phone is ringing wants one of two buttons and nothing else.
+            if let call = state.calls.current {
+                liveCall(call)
+                Divider()
+            }
+
             if state.status.isConnected {
                 connectedBody
             } else {
@@ -43,6 +50,53 @@ struct MenuBarView: View {
         }
         .padding(16)
         .frame(width: 280)
+    }
+
+    /// The ringing or in-progress call, answerable without opening the window.
+    @ViewBuilder
+    private func liveCall(_ call: MirroredCall) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Avatar(image: state.icons[call.avatarHash] ?? state.icons[call.iconHash],
+                       monogram: call.title.monogram, size: 28)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(call.title).fontWeight(.semibold).lineLimit(1)
+                    CallStatusLine(call: call)
+                }
+                Spacer(minLength: 0)
+            }
+            HStack(spacing: 8) {
+                if call.canAnswer {
+                    Button {
+                        state.perform(.answer, on: call)
+                    } label: {
+                        Label("Answer", systemImage: "phone.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.green)
+                }
+                if call.canDecline {
+                    Button(role: .destructive) {
+                        state.perform(.decline, on: call)
+                    } label: {
+                        Label("Decline", systemImage: "phone.down.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                if call.canHangUp {
+                    Button(role: .destructive) {
+                        state.perform(.hangup, on: call)
+                    } label: {
+                        Label("Hang up", systemImage: "phone.down.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+            }
+            // Repeated here for the same reason it is repeated everywhere else: this is a
+            // surface someone can answer a call from without ever seeing the window.
+            Caption("Audio stays on your phone.")
+        }
     }
 
     private var header: some View {

@@ -7,13 +7,46 @@ import SwiftUI
 /// eight. Two views could get away with that; a window, a sidebar, a transcript and a
 /// device pane cannot. `android/.../ui/TennaTheme.kt` is the visual reference.
 enum Tenna {
-    /// The brand teal, matching `TennaTheme.kt`'s seed. Light and dark values are the
-    /// Material scheme's `primary` in each, so the two apps read as one product.
+    /// The brand sky, matching `TennaTheme.kt`'s `primary`, so the two apps read as one
+    /// product. Tints, dots and monograms only — see ``accentFill`` for anything that
+    /// carries white text.
     static let accent = Color(nsColor: NSColor(name: nil) { appearance in
         appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-            ? NSColor(srgbRed: 0.424, green: 0.847, blue: 0.737, alpha: 1)   // #6CD8BC
-            : NSColor(srgbRed: 0.000, green: 0.420, blue: 0.353, alpha: 1)   // #006B5A
+            ? NSColor(srgbRed: 0.490, green: 0.827, blue: 0.988, alpha: 1)   // #7DD3FC
+            : NSColor(srgbRed: 0.008, green: 0.451, blue: 0.690, alpha: 1)   // #0273B0
     })
+
+    /// The accent as a *fill behind white text* — message bubbles, unread badges.
+    ///
+    /// It does not follow the appearance, and that is the point. ``accent`` goes pale in
+    /// dark mode so it stays visible as a tint on a dark ground, but white on that pale
+    /// blue is about 1.6:1. Anything with white on top needs the fixed dark value, which
+    /// carries white at 5.15:1.
+    static let accentFill = Color(.sRGB, red: 0.008, green: 0.451, blue: 0.690, opacity: 1)
+
+    /// The page backdrop, matching `Modifier.tennaBackdrop()` on Android and the site's
+    /// `135deg` gradient: pale cyan into sky into lavender.
+    static let backdrop = LinearGradient(
+        colors: [
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.063, green: 0.094, blue: 0.153, alpha: 1)  // #101827
+                    : NSColor(srgbRed: 0.878, green: 0.918, blue: 0.988, alpha: 1)  // #E0EAFC
+            }),
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.086, green: 0.125, blue: 0.227, alpha: 1)  // #16203A
+                    : NSColor(srgbRed: 0.812, green: 0.871, blue: 0.953, alpha: 1)  // #CFDEF3
+            }),
+            Color(nsColor: NSColor(name: nil) { appearance in
+                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+                    ? NSColor(srgbRed: 0.133, green: 0.114, blue: 0.227, alpha: 1)  // #221D3A
+                    : NSColor(srgbRed: 0.886, green: 0.831, blue: 0.941, alpha: 1)  // #E2D4F0
+            })
+        ],
+        startPoint: .topLeading,
+        endPoint: .bottomTrailing
+    )
 
     static func batteryIcon(_ level: Int) -> String {
         switch level {
@@ -39,6 +72,29 @@ enum Tenna {
     /// notifications never carried an app label.
     static func appName(_ pkg: String, fallback: String) -> String {
         fallback.isEmpty ? (pkg.split(separator: ".").last.map(String.init) ?? pkg) : fallback
+    }
+}
+
+/// One pane of frosted glass, the counterpart of `GlassSurface` on Android.
+///
+/// SwiftUI gives real backdrop blur here for free — `.ultraThinMaterial` samples what is
+/// actually behind it — which is why the Mac gets the effect the Compose side has to
+/// approximate with translucency alone.
+struct GlassPanel: ViewModifier {
+    var cornerRadius: CGFloat = 16
+
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        content
+            .background(.ultraThinMaterial, in: shape)
+            .overlay(shape.strokeBorder(Color.white.opacity(0.5), lineWidth: 1))
+            .shadow(color: Tenna.accent.opacity(0.18), radius: 20, y: 10)
+    }
+}
+
+extension View {
+    func glassPanel(cornerRadius: CGFloat = 16) -> some View {
+        modifier(GlassPanel(cornerRadius: cornerRadius))
     }
 }
 
@@ -159,7 +215,7 @@ struct PairingCode: View {
                     .resizable()
                     .frame(width: size, height: size)
                     .background(Color.white)
-                    .cornerRadius(6)
+                    .clipShape(.rect(cornerRadius: 10, style: .continuous))
             } else {
                 Text("Could not generate the pairing code.")
                     .font(.caption)

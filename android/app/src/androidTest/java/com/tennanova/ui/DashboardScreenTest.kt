@@ -81,27 +81,28 @@ class DashboardScreenTest {
         ).performScrollTo().assertIsDisplayed()
     }
 
-    @Test fun errorsDarkModeAndLargeFontsRemainReadable() {
+    @Test fun errorsAtLargeFontsRemainReadable() {
         render(MainUiState(paired = true, connection = ConnectionStatus.PIN_MISMATCH,
             clipboard = ClipboardAccessStatus.ERROR,
-            error = "The Mac identity changed."), dark = true, fontScale = 1.6f)
+            error = "The Mac identity changed."), fontScale = 1.6f)
         compose.onNodeWithText("Mac identity changed").assertIsDisplayed()
         compose.onNodeWithText("The Mac identity changed.").assertIsDisplayed()
         compose.onNodeWithText("Needs attention").performScrollTo().assertIsDisplayed()
     }
 
-    private fun render(state: MainUiState, dark: Boolean = false, fontScale: Float = 1f) {
+    private fun render(state: MainUiState, fontScale: Float = 1f) {
         compose.setContent {
             val density = LocalDensity.current
             CompositionLocalProvider(
                 LocalDensity provides Density(density.density, fontScale)
             ) {
-                TennaTheme(darkTheme = dark) {
+                TennaTheme {
                     DashboardScreen(
                         state = state,
                         onOpenNotificationAccess = {}, onOpenAccessibility = {},
                         onScanQr = {}, onPair = { true }, onUnpair = {},
-                        onSetSmsEnabled = {}
+                        onSetSmsEnabled = {},
+                        onSetCallsEnabled = {}, onGrantCallControl = {}
                     )
                 }
             }

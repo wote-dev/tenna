@@ -23,6 +23,15 @@ enum Proto {
     /// WhatsApp, Signal and the rest expose nothing but their notifications, so those can
     /// only ever be replied to; SMS can be a real client.
     static let smsCapability = "sms.v1"
+
+    /// The phone mirrors calls, and can answer, decline and end one on this Mac's behalf.
+    ///
+    /// Calls are read out of notifications rather than from a telephony API, which is what
+    /// makes this cover WhatsApp and Signal calls as well as cellular ones. **Audio is not
+    /// part of it and cannot be** — Android lets no third-party app capture voice-call
+    /// audio — so this Mac rings and controls, and the sound stays on the phone. Every
+    /// surface that offers a call button here says so.
+    static let callCapability = "call.v1"
     static let maxImageBytes = 25 * 1024 * 1024
 
     static func isLowercaseSHA256(_ value: String) -> Bool {
@@ -159,6 +168,17 @@ struct NotifPosted: Codable {
     /// than reporting something new. Those must never re-alert.
     var resync: Bool?
     var actions: [NotifAction]
+}
+
+extension NotifPosted {
+    /// Whether this is a person talking rather than an app announcing something.
+    ///
+    /// The two signals that do not misfire. A `msg` category and a `conversationTitle`
+    /// both do: marketing notifications set them — the category buys priority — which is
+    /// why the window's Messages tab asks this and not `ConversationKey.groupsAsChat`.
+    var isSomebodyTalking: Bool {
+        !(senderName ?? "").isEmpty || actions.contains { $0.isReply }
+    }
 }
 
 struct NotifRemoved: Codable {
@@ -316,6 +336,104 @@ struct SmsSendResult: Codable {
     var clientId: String
     var ok: Bool
     var threadId: Int64?
+    var error: String?
+}
+
+// MARK: - Calls
+
+/// Where a call is in its life. Decoded leniently from the wire: an unfamiliar state from
+/// a newer phone build must not take the whole message down with it.
+enum CallLifecycle: String, Codable {
+    case ringing
+    case active
+    case ended
+}
+
+/// Which way the call went. Android does not say, so the phone infers it from how the call
+/// was first seen; it is only ever used to label a row in the recents list.
+enum CallDirection: String, Codable {
+    case incoming
+    case outgoing
+}
+
+/// One call, sent on every change to it. `ended` is the last one for an id.
+///
+/// `canAnswer` / `canDecline` / `canHangUp` are per call and not per phone: whether *this*
+/// notification carried the intents, or whether the phone's Telecom fallback will take it.
+/// Drawing a button that resolves to nothing is worse than drawing no button.
+struct CallStateMessage: Codable {
+    var v = Proto.version
+    var type = "call.state"
+    var id: String
+    /// Raw rather than the enum: see `lifecycle`.
+    var state: String
+    var direction: String?
+    var pkg: String
+    var appLabel: String
+    var iconHash: String?
+    var avatarHash: String?
+    var displayName: String?
+    var number: String?
+    var video: Bool?
+    var when: Int64?
+    var canAnswer: Bool?
+    var canDecline: Bool?
+    var canHangUp: Bool?
+    /// Set when the phone is replaying a call that was already in progress after a
+    /// reconnect. The Mac still shows it — it is happening *now* — but see `CallLog`.
+    var resync: Bool?
+    /// The dialer's own extra buttons, "Message" and the like. Answer and decline are not
+    /// among them; those are resolved on the phone. These fire through `notif.action`,
+    /// whose key is this same id.
+    var actions: [NotifAction]?
+
+    /// An unknown state is treated as the call being over, which is the safe reading: it
+    /// stops a Mac from holding a card with live buttons for something it cannot follow.
+    var lifecycle: CallLifecycle { CallLifecycle(rawValue: state) ?? .ended }
+    var way: CallDirection { direction.flatMap(CallDirection.init(rawValue:)) ?? .incoming }
+}
+
+/// Answer, decline or hang up. `decline` and `hangup` are kept apart because they are
+/// different buttons on different screens, and because a `CallStyle` notification carries
+/// a separate intent for each.
+enum CallActionKind: String, Codable {
+    case answer
+    case decline
+    case hangup
+
+    var label: String {
+        switch self {
+        case .answer:  return "Answer"
+        case .decline: return "Decline"
+        case .hangup:  return "Hang up"
+        }
+    }
+}
+
+struct CallActionInvoke: Codable {
+    var v = Proto.version
+    var type = "call.action"
+    var id: String
+    var action: String
+    /// Echoed back in `call.action.result`, so a failure lands on the call it belongs to.
+    var clientId: String?
+
+    init(id: String, action: CallActionKind, clientId: String? = nil) {
+        self.id = id
+        self.action = action.rawValue
+        self.clientId = clientId
+    }
+}
+
+/// What the phone did about it. `error` is a sentence written for the user, and is shown
+/// on the call card as it arrives.
+struct CallActionResult: Codable {
+    var v = Proto.version
+    var type = "call.action.result"
+    var clientId: String?
+    var id: String
+    var action: String
+    var ok: Bool
     var error: String?
 }
 

@@ -28,11 +28,16 @@ struct TennaNovaApp: App {
             MenuBarView()
                 .environment(delegate.state)
         } label: {
-            Image(systemName: delegate.state.status.isConnected
-                  ? "iphone.badge.play"
-                  : delegate.state.serverActivity.isAttempting
-                      ? "arrow.triangle.2.circlepath"
-                      : "iphone.slash")
+            // A ringing phone changes the menu bar itself. It is the one event in this
+            // app worth taking the icon over, and it is what someone glances at when they
+            // hear a phone buzzing in another room.
+            Image(systemName: delegate.state.calls.isRinging
+                  ? "phone.badge.waveform.fill"
+                  : delegate.state.status.isConnected
+                      ? "iphone.badge.play"
+                      : delegate.state.serverActivity.isAttempting
+                          ? "arrow.triangle.2.circlepath"
+                          : "iphone.slash")
         }
         .menuBarExtraStyle(.window)
     }

@@ -1,5 +1,9 @@
 package com.tennanova.core
 
+import com.tennanova.calls.CallAction
+import com.tennanova.calls.CallDirection
+import com.tennanova.calls.CallSnapshot
+import com.tennanova.calls.CallState
 import org.json.JSONArray
 import org.json.JSONObject
 import org.junit.Assert.assertEquals
@@ -171,5 +175,66 @@ class ProtocolTest {
         // The Mac offers a composer for a withdrawn conversation only when it sees this.
         assertTrue(Proto.OFFLINE_REPLY_CAPABILITY in advertised)
         assertTrue(Proto.IMAGE_CLIPBOARD_CAPABILITY in advertised)
+    }
+
+    @Test fun `a call carries everything the Mac draws a card from`() {
+        val call = CallSnapshot(
+            id = "0|com.dialer|1|null|1000",
+            state = CallState.RINGING,
+            direction = CallDirection.INCOMING,
+            pkg = "com.dialer",
+            appLabel = "Phone",
+            displayName = "Sam",
+            number = "+61491570006",
+            isVideo = false,
+            whenMs = 1723900000000,
+            canAnswer = true,
+            canDecline = true,
+            canHangUp = false,
+            iconHash = "ab12",
+            avatarHash = "cd34",
+            actions = listOf(NotifAction(2, "Message", false))
+        )
+        val json = Messages.callState(call, resync = false)
+        assertEquals("call.state", json.getString("type"))
+        assertEquals("ringing", json.getString("state"))
+        assertEquals("incoming", json.getString("direction"))
+        assertEquals("Sam", json.getString("displayName"))
+        assertEquals("+61491570006", json.getString("number"))
+        assertTrue(json.getBoolean("canAnswer"))
+        assertFalse(json.getBoolean("canHangUp"))
+        assertEquals("Message", json.getJSONArray("actions").getJSONObject(0).getString("label"))
+        // Absence is the signal, exactly as it is for `resync` on a notification.
+        assertFalse(json.has("resync"))
+        assertTrue(Messages.callState(call, resync = true).getBoolean("resync"))
+    }
+
+    @Test fun `a call with no caller details omits them rather than sending blanks`() {
+        val call = CallSnapshot(
+            id = "k", state = CallState.ENDED, direction = CallDirection.OUTGOING,
+            pkg = "com.dialer", appLabel = "Phone", displayName = null, number = null,
+            isVideo = false, whenMs = 1, canAnswer = false, canDecline = false,
+            canHangUp = false
+        )
+        val json = Messages.callState(call, resync = false)
+        assertFalse(json.has("displayName"))
+        assertFalse(json.has("number"))
+        assertFalse(json.has("iconHash"))
+        assertEquals(0, json.getJSONArray("actions").length())
+    }
+
+    @Test fun `a failed call action reports the sentence the user will read`() {
+        val json = Messages.callActionResult(
+            "9F3B", "k", CallAction.ANSWER, ok = false, error = "That call is not ringing."
+        )
+        assertEquals("call.action.result", json.getString("type"))
+        assertEquals("9F3B", json.getString("clientId"))
+        assertEquals("answer", json.getString("action"))
+        assertFalse(json.getBoolean("ok"))
+        assertEquals("That call is not ringing.", json.getString("error"))
+        // Success carries no error key at all.
+        assertFalse(
+            Messages.callActionResult(null, "k", CallAction.HANGUP, true, null).has("error")
+        )
     }
 }

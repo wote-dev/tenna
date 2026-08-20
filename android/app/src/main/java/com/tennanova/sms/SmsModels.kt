@@ -41,7 +41,7 @@ object SmsAddresses {
 
     /**
      * The digits that actually identify a number, for comparing two spellings of one
-     * person: `+61 401 660 454`, `0401660454` and `401660454` all reduce to the same thing.
+     * person: `+61 491 570 006`, `0491570006` and `491570006` all reduce to the same thing.
      *
      * Keeps the last [SIGNIFICANT_DIGITS] because country code and trunk prefix are
      * exactly the parts that differ between spellings, and the subscriber number is the

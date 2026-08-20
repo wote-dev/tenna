@@ -15,6 +15,18 @@
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
 
+    <!-- Calls. Both are optional, and neither is needed to *see* a call on the Mac:
+         calls are read out of notifications, which the listener already receives, and most
+         dialers put answer and decline intents in the notification itself. These two exist
+         for the dialer that does not — ANSWER_PHONE_CALLS is what lets TelecomManager
+         accept or end the call instead. READ_PHONE_STATE accompanies it because Android
+         will not grant call control meaningfully without it.
+         There is no CAPTURE_AUDIO_OUTPUT here and there cannot be: it is privileged, so no
+         third-party app can carry call audio. The Mac controls the call; the phone carries
+         the sound. -->
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
     <queries>
         <intent>
             <action android:name="android.intent.action.MAIN" />

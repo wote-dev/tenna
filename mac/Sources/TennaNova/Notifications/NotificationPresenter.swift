@@ -244,6 +244,8 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     var onAction: ((_ key: String, _ actionId: Int) -> Void)?
     var onDismissed: ((_ key: String) -> Void)?
     var onIconNeeded: ((_ hash: String) -> Void)?
+    /// Answer or decline pressed on a mirrored call card.
+    var onCallAction: ((_ callId: String, _ action: CallActionKind) -> Void)?
 
     private let center = UNUserNotificationCenter.current()
     private let icons: IconCache
@@ -261,6 +263,8 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
     private enum PresentationEvent {
         case present(NotifPosted)
         case withdraw(String)
+        case presentCall(MirroredCall)
+        case withdrawCall(String)
     }
     private var presentationEvents: [PresentationEvent] = []
     private var isPresentationEventInFlight = false
@@ -338,14 +342,37 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         enqueue(.withdraw(key))
     }
 
+    /// A phone is ringing. This is the surface that matters when the window is closed,
+    /// which for a call is most of the time.
+    func presentCall(_ call: MirroredCall) {
+        enqueue(.presentCall(call))
+    }
+
+    /// The call was answered, declined, or ended — on either device. Either way the card
+    /// asking what to do about it is now a lie.
+    func withdrawCall(id: String) {
+        enqueue(.withdrawCall(id))
+    }
+
     private func hydrateDeliveredNotifications() {
         center.getDeliveredNotifications { [weak self] delivered in
             guard let self else { return }
+
+            // A call card from a previous launch is about a call that is certainly over.
+            // Left alone it would sit in Notification Center offering to answer it.
+            let staleCalls = delivered.map { $0.request.identifier }
+                .filter { $0.hasPrefix(Self.callIdentifierPrefix) }
+            if !staleCalls.isEmpty {
+                self.center.removeDeliveredNotifications(withIdentifiers: staleCalls)
+            }
 
             self.lock.lock()
             for notification in delivered {
                 let request = notification.request
                 let content = request.content
+                // Call cards carry `callId`, never `key`, which is what keeps them out of
+                // the dismissal watch below — a call is not a notification the phone can
+                // be told to cancel.
                 guard let key = content.userInfo["key"] as? String else { continue }
 
                 self.dismissals.observed(key)
@@ -389,6 +416,10 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
             processPresent(notification)
         case .withdraw(let key):
             processWithdraw(key: key)
+        case .presentCall(let call):
+            processPresentCall(call)
+        case .withdrawCall(let id):
+            processWithdrawCall(id: id)
         }
     }
 
@@ -495,6 +526,84 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         finishPresentationEvent()
     }
 
+    // MARK: - Calls
+
+    /// The prefix that keeps call cards out of everything keyed on a notification key —
+    /// the replay guard, the dismissal watch, and the `notif.dismiss` the watcher sends.
+    static let callIdentifierPrefix = "tenna.call:"
+
+    static func callIdentifier(_ id: String) -> String { callIdentifierPrefix + id }
+
+    private func processPresentCall(_ call: MirroredCall) {
+        let content = UNMutableNotificationContent()
+        content.title = call.title
+        content.subtitle = call.isVideo
+            ? "Incoming video call · \(call.appLabel)"
+            : "Incoming call · \(call.appLabel)"
+        // Said on the card itself, not only in the window. Someone who answers from
+        // Notification Center and then hears nothing has been misled by this app.
+        content.body = "Audio stays on your phone."
+        // A ringing phone deserves a different sound from a message. macOS resolves the
+        // name against the system sounds; anything it cannot find falls back to the
+        // default alert, which is the same sound as before rather than silence.
+        content.sound = UNNotificationSound(named: UNNotificationSoundName("Submarine.aiff"))
+        content.userInfo = ["callId": call.id, "pkg": call.pkg]
+        content.categoryIdentifier = registerCallCategory(for: call)
+
+        if let hash = call.avatarHash ?? call.iconHash {
+            if !icons.has(hash) { onIconNeeded?(hash) }
+            if let tmp = icons.temporaryCopy(of: hash),
+               let att = try? UNNotificationAttachment(identifier: hash, url: tmp) {
+                content.attachments = [att]
+            }
+        }
+
+        let request = UNNotificationRequest(
+            identifier: Self.callIdentifier(call.id), content: content, trigger: nil
+        )
+        center.add(request) { [weak self] error in
+            if let error {
+                Log.error("failed to show call from \(call.title): \(error.localizedDescription)")
+            } else {
+                Log.info("ringing: \(call.title) via \(call.appLabel)")
+            }
+            self?.finishPresentationEvent()
+        }
+    }
+
+    private func processWithdrawCall(id: String) {
+        center.removeDeliveredNotifications(withIdentifiers: [Self.callIdentifier(id)])
+        finishPresentationEvent()
+    }
+
+    /// Only the buttons this call can actually honour. `canAnswer` and `canDecline` are the
+    /// phone's answer to "will pressing this do anything", and a card that offers Answer
+    /// against a dialer with no answer intent would be a button that fails after the ring
+    /// has stopped mattering.
+    private func registerCallCategory(for call: MirroredCall) -> String {
+        var actions: [UNNotificationAction] = []
+        if call.canAnswer {
+            actions.append(UNNotificationAction(
+                identifier: "call.answer", title: "Answer", options: [.foreground]
+            ))
+        }
+        if call.canDecline {
+            actions.append(UNNotificationAction(
+                identifier: "call.decline", title: "Decline", options: [.destructive]
+            ))
+        }
+        let categoryId = "tenna.call.\(call.canAnswer ? "a" : "")\(call.canDecline ? "d" : "")"
+        let category = UNNotificationCategory(
+            identifier: categoryId, actions: actions, intentIdentifiers: [], options: []
+        )
+        center.getNotificationCategories { existing in
+            var set = existing
+            set.insert(category)
+            self.center.setNotificationCategories(set)
+        }
+        return categoryId
+    }
+
     // MARK: - Icons
 
     func receiveIconBytes(_ data: Data, hash: String) {
@@ -593,6 +702,18 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                                 withCompletionHandler completionHandler: @escaping () -> Void) {
         let key = response.notification.request.identifier
         let id = response.actionIdentifier
+
+        // Calls first: their identifiers are not notification keys, and everything below
+        // this would report one to the phone as a notification the user dismissed.
+        if let callId = response.notification.request.content.userInfo["callId"] as? String {
+            switch id {
+            case "call.answer":  onCallAction?(callId, .answer)
+            case "call.decline": onCallAction?(callId, .decline)
+            default: break
+            }
+            completionHandler()
+            return
+        }
 
         if let textResponse = response as? UNTextInputNotificationResponse,
            id.hasPrefix("reply."),
