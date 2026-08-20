@@ -48,6 +48,42 @@ enum Tenna {
         endPoint: .bottomTrailing
     )
 
+    /// Picks between two values by appearance.
+    ///
+    /// `Tenna.accent` and `Tenna.backdrop` above spell this out longhand because they were
+    /// written before there was a second caller. Everything added since goes through here.
+    static func dynamic(light: NSColor, dark: NSColor) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua ? dark : light
+        })
+    }
+
+    /// The hairline around a glass panel.
+    ///
+    /// Was a flat 50% white, which is a lit edge on a dark ground and very nearly nothing on
+    /// the pale light gradient — the panels lost their outline entirely in light mode. Light
+    /// mode gets a dark hairline instead, which is the same idea the other way up.
+    static let panelBorder = dynamic(
+        light: NSColor(srgbRed: 0.06, green: 0.09, blue: 0.16, alpha: 0.14),
+        dark:  NSColor(white: 1, alpha: 0.5)
+    )
+
+    /// The tint under a glass panel's shadow. Pale ground shows a coloured shadow as a
+    /// bruise, so light mode drops most of it and keeps the lift.
+    static let panelShadow = dynamic(
+        light: NSColor(srgbRed: 0.06, green: 0.09, blue: 0.16, alpha: 0.10),
+        dark:  NSColor(srgbRed: 0.008, green: 0.451, blue: 0.690, alpha: 0.18)
+    )
+
+    /// The fill behind a message from the other person.
+    ///
+    /// A flat `primary.opacity(0.09)` reads on a dark ground and all but disappears over
+    /// `.ultraThinMaterial` on the light gradient, which left incoming bubbles shapeless.
+    static let incomingBubble = dynamic(
+        light: NSColor(srgbRed: 0.06, green: 0.09, blue: 0.16, alpha: 0.10),
+        dark:  NSColor(white: 1, alpha: 0.11)
+    )
+
     static func batteryIcon(_ level: Int) -> String {
         switch level {
         case ..<15:  return "battery.25"
@@ -87,8 +123,8 @@ struct GlassPanel: ViewModifier {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         content
             .background(.ultraThinMaterial, in: shape)
-            .overlay(shape.strokeBorder(Color.white.opacity(0.5), lineWidth: 1))
-            .shadow(color: Tenna.accent.opacity(0.18), radius: 20, y: 10)
+            .overlay(shape.strokeBorder(Tenna.panelBorder, lineWidth: 1))
+            .shadow(color: Tenna.panelShadow, radius: 20, y: 10)
     }
 }
 
@@ -214,6 +250,8 @@ struct PairingCode: View {
                     .interpolation(.none)
                     .resizable()
                     .frame(width: size, height: size)
+                    // Fixed white in both appearances, deliberately: a QR needs its light
+                    // modules light and its quiet zone white, or a camera cannot read it.
                     .background(Color.white)
                     .clipShape(.rect(cornerRadius: 10, style: .continuous))
             } else {

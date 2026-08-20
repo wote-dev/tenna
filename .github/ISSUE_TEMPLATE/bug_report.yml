@@ -1,0 +1,81 @@
+name: Bug report
+description: Something misbehaves on the Mac, on the phone, or between them.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Tennanova has been exercised on a small number of devices, so a report that names the
+        hardware and the app involved is the useful kind — most bugs here turn out to be one
+        dialer or one messaging app shaping its notifications differently.
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what you got instead.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Which part
+      options:
+        - Notifications
+        - Replying to a message
+        - SMS
+        - Calls
+        - Clipboard
+        - Pairing or connecting
+        - The Mac window or menu bar
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: phone
+    attributes:
+      label: Phone and Android version
+      placeholder: Pixel 8, Android 15
+    validations:
+      required: true
+
+  - type: input
+    id: mac
+    attributes:
+      label: Mac and macOS version
+      placeholder: M2 MacBook Air, macOS 15.3
+    validations:
+      required: true
+
+  - type: input
+    id: app
+    attributes:
+      label: Which app's notification, call or message
+      description: >-
+        The app on the phone that posted it — WhatsApp, Signal, the stock dialer, and so on.
+        Leave blank if this is not about a specific app.
+      placeholder: WhatsApp
+
+  - type: dropdown
+    id: transport
+    attributes:
+      label: How were the devices connected
+      options:
+        - Same Wi-Fi (LAN)
+        - USB
+        - Relay
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: >-
+        From the Mac: `log show --predicate 'subsystem == "com.tennanova.mac"' --info --last 10m`.
+        From the phone: `adb logcat -d -s TennaNova`. Redact anything you would rather not
+        publish — message bodies are not needed to fix most of these.
+      render: shell

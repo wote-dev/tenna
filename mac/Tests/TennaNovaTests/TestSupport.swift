@@ -46,6 +46,23 @@ func makeNotification(
     )
 }
 
+/// Encodes and decodes a replay guard, the way `PresentationArchive` does across a launch.
+///
+/// Here rather than in the test file because `JSONEncoder` is a Foundation type — see the
+/// note at the top of this file for why naming one next to `import Testing` does not build.
+func roundTripped(_ guardState: NotificationReplayGuard) -> NotificationReplayGuard? {
+    guard let data = try? JSONEncoder().encode(guardState) else { return nil }
+    return try? JSONDecoder().decode(NotificationReplayGuard.self, from: data)
+}
+
+/// Hands a test its own presentation archive in a throwaway directory, and cleans up.
+func withTemporaryPresentationArchive(_ body: (PresentationArchive) -> Void) {
+    let dir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("tenna-presented-\(UUID().uuidString)", isDirectory: true)
+    defer { try? FileManager.default.removeItem(at: dir) }
+    body(PresentationArchive(directory: dir))
+}
+
 /// Hands a test its own archive in a throwaway directory and cleans up after it.
 ///
 /// The directory plumbing lives here rather than in the test file for the same reason

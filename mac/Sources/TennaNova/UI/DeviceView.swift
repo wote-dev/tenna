@@ -30,6 +30,9 @@ struct DeviceView: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .glassPanel(cornerRadius: 20)
 
+                Divider()
+                appearance
+
                 if state.isPaired {
                     Divider()
                     Button("Unpair this phone…", role: .destructive) { confirmUnpair = true }
@@ -66,6 +69,23 @@ struct DeviceView: View {
     }
 
     // MARK: - Sections
+
+    /// Light, dark or system. Here rather than in the menu bar popover, which is 280pt wide
+    /// and already has two buttons competing for the bottom of it.
+    private var appearance: some View {
+        @Bindable var state = state
+        return HStack {
+            Label("Appearance", systemImage: "circle.lefthalf.filled")
+            Spacer(minLength: 12)
+            Picker("Appearance", selection: $state.appearance) {
+                ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .frame(maxWidth: 220)
+        }
+        .font(.callout)
+    }
 
     private var header: some View {
         HStack(spacing: 12) {

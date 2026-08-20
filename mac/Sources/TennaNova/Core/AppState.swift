@@ -45,6 +45,16 @@ final class AppState {
     /// this the menu bar cannot say *which* phone it is waiting for.
     private(set) var pairedDeviceName: String?
 
+    /// Light, dark or system. Held here because `AppState` is the one thing every view
+    /// already has from the environment, so the picker needs nothing new plumbed to it.
+    /// Writing it applies it — see `AppAppearance.apply()`.
+    var appearance: AppAppearance = .stored {
+        didSet {
+            guard appearance != oldValue else { return }
+            MainActor.assumeIsolated { appearance.apply() }
+        }
+    }
+
     /// Shown as a QR until the phone pairs. Regenerated each launch while unpaired.
     private(set) var pairingPayload: String = ""
 
@@ -255,6 +265,9 @@ final class AppState {
         history.clearAll()
         calls.clearAll()
         icons.clearAll()
+        // Nor its record of what has already been shown. Notification keys are the phone's,
+        // not ours, so the next device's could collide with them and arrive pre-silenced.
+        notifications?.forgetPresentationHistory()
     }
 
     // MARK: - Message routing
@@ -280,12 +293,19 @@ final class AppState {
 
         case "notif.posted":
             if let m = try? Wire.decode(NotifPosted.self, from: data) {
+                requestAssets(for: m)
                 // The store ingests even when the presenter suppresses a resync replay —
                 // that is exactly what repopulates a Mac that restarted while the phone
-                // stayed connected.
-                history.ingest(m)
-                requestAssets(for: m)
-                notifications?.present(m)
+                // stayed connected. So the transcript is unconditional and only the *alert*
+                // turns on the outcome: a post that the reducer recognised as our own reply
+                // coming back must not ring as a notification of the user's own message.
+                history.ingest(m) { [weak self] outcome in
+                    guard outcome.deservesAnAlert else {
+                        Log.info("suppressed our own reply echoed back by \(m.appLabel)")
+                        return
+                    }
+                    self?.notifications?.present(m)
+                }
             }
 
         case "call.state":

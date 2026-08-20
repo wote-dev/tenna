@@ -17,6 +17,57 @@ struct NotificationPresenterTests {
         ) == nil)
     }
 
+    @Test func thePresentationHistorySurvivesARelaunch() {
+        let notification = sampleNotification()
+        let identity = NotificationPresentationIdentity(notification)
+
+        var before = NotificationReplayGuard()
+        before.seed(key: notification.key, fingerprint: identity.fingerprint)
+
+        let after = roundTripped(before)
+
+        // The whole point: a card the user read and cleared is still known to have been
+        // shown, so the phone's reconnect replay stays quiet instead of ringing again.
+        #expect(after?.hasPresented(key: notification.key,
+                                    fingerprint: identity.fingerprint) == true)
+    }
+
+    @Test func aRestoredGuardStillBelievesNothingIsOnScreen() {
+        let notification = sampleNotification()
+        let identity = NotificationPresentationIdentity(notification)
+
+        var before = NotificationReplayGuard()
+        before.seed(key: notification.key, fingerprint: identity.fingerprint)
+
+        var after = roundTripped(before)
+
+        // `fingerprints` is not persisted, and must not be: it claims a card is in
+        // Notification Center, and macOS discarded those when the app quit. So a
+        // reservation is still available, and the presenter's own resync check — which
+        // consults `hasPresented` above — is what stays its hand.
+        #expect(after?.reserve(key: notification.key,
+                               fingerprint: identity.fingerprint) != nil)
+    }
+
+    @Test func aSavedPresentationHistoryReloadsFromDisk() {
+        let notification = sampleNotification()
+        let identity = NotificationPresentationIdentity(notification)
+
+        withTemporaryPresentationArchive { archive in
+            #expect(archive.load() == nil)
+
+            var guardState = NotificationReplayGuard()
+            guardState.seed(key: notification.key, fingerprint: identity.fingerprint)
+            archive.save(guardState)
+
+            #expect(archive.load()?.hasPresented(key: notification.key,
+                                                 fingerprint: identity.fingerprint) == true)
+
+            archive.delete()
+            #expect(archive.load() == nil)
+        }
+    }
+
     @Test func seededDeliveredNotificationSuppressesReconnectReplay() {
         let notification = sampleNotification()
         let identity = NotificationPresentationIdentity(notification)

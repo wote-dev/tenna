@@ -84,6 +84,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // and `LSUIElement` in Info.plist — is what used to suppress the Dock icon and
         // any main window along with it.
         NSApp.setActivationPolicy(.regular)
+        // Before anything draws, so the first frame is already the appearance the user
+        // asked for rather than the system's answer followed by a flip.
+        state.appearance.apply()
         Log.info("TennaNova starting")
         state.start()
     }

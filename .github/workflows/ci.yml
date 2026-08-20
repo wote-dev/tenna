@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A second push to a branch makes the first run's answer irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    name: Mac app
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run the Swift Testing suite
+        working-directory: mac
+        # `test.sh` rather than `swift test`: it adds the framework search paths the
+        # standalone Command Line Tools need. On a runner with full Xcode it is a no-op,
+        # which is exactly why it is safe to use in both places.
+        run: ./test.sh
+
+  android:
+    name: Android app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: gradle/actions/setup-gradle@v4
+      # Unit tests only. `connectedDebugAndroidTest` needs a device, and it uninstalls the
+      # app to run — which on a real phone costs a full re-pair.
+      - name: Run the JUnit suite
+        working-directory: android
+        run: ./gradlew --no-daemon testDebugUnitTest
+
+  relay:
+    name: Relay
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: relay/package-lock.json
+      - run: npm ci
+        working-directory: relay
+      - run: npm test
+        working-directory: relay

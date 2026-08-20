@@ -147,6 +147,21 @@ struct ConversationThread: Identifiable, Codable, Equatable {
     /// A summary carries a snippet, not a transcript, so a never-opened SMS thread would
     /// otherwise sit blank in the sidebar.
     var snippet: String?
+    /// How far this thread has been read **on the Mac**, as of the last activity the reader
+    /// had in front of them.
+    ///
+    /// The unread badge would otherwise come back on every reconnect. The phone re-pushes
+    /// `sms.threads` whenever the provider changes, and each summary carries the provider's
+    /// own unread count — which still counts the texts you just read here, because reading
+    /// on the Mac cannot mark them read on the phone. Nothing in the protocol can: writing
+    /// the provider's `read` column needs the default-SMS-app role, which this app
+    /// deliberately does not take. So the Mac keeps its own watermark and refuses to let a
+    /// summary resurrect a badge for messages no newer than it.
+    ///
+    /// Nil for a thread that has never been opened here, and for threads restored from an
+    /// archive written before this existed — in both cases the phone's count is the only
+    /// answer available, and it is the right one.
+    var readThrough: Date?
 
     var latest: MirroredMessage? { messages.last }
 
@@ -188,6 +203,23 @@ enum IngestOutcome: Equatable {
     case duplicate
     /// A phone post that turned out to be the echo of a reply we sent.
     case reconciledOutgoing(UUID)
+
+    /// Whether macOS should raise a card for the post that produced this outcome.
+    ///
+    /// Only `.reconciledOutgoing` is excluded, and that case is the whole reason this
+    /// exists. A chat app re-posts its MessagingStyle notification once a reply goes out,
+    /// and that post carries the line the user just typed *on this Mac*. The transcript
+    /// already folds it into the bubble sitting on screen; alerting as well means being
+    /// notified of your own message a second after sending it.
+    ///
+    /// `.duplicate` stays alertable on purpose. Judging duplicates is
+    /// `NotificationReplayGuard`'s job, because it knows what is in Notification Center and
+    /// this reducer does not — a message the transcript already holds may still never have
+    /// been shown.
+    var deservesAnAlert: Bool {
+        if case .reconciledOutgoing = self { return false }
+        return true
+    }
 }
 
 /// Pure, testable reducer over everything the phone has mirrored.
@@ -326,8 +358,11 @@ struct ConversationLog: Codable, Equatable {
             delivery: .incoming
         ))
         thread.lastActivity = max(thread.lastActivity, stamp)
-        // A replay of something the user has already seen is not news.
-        if n.resync != true { thread.unreadCount += 1 }
+        // A replay of something the user has already seen is not news, and neither is a
+        // repost carrying nothing newer than what they have already read on this Mac.
+        if n.resync != true, stamp > (thread.readThrough ?? .distantPast) {
+            thread.unreadCount += 1
+        }
         trim(&thread)
         return .appended(key)
     }
@@ -354,9 +389,16 @@ struct ConversationLog: Codable, Equatable {
             thread.smsAddress = summary.address
             thread.isConversation = true
             thread.lastActivity = max(thread.lastActivity, stamp)
-            // The phone counts unread from the provider, which is the truth: it knows
-            // about texts read on the phone that never reached this Mac at all.
-            thread.unreadCount = summary.unread
+            // The phone counts unread from the provider, which is the truth about texts
+            // read on the phone that never reached this Mac at all — but it knows nothing
+            // about texts read *here*. Anything no newer than the Mac's watermark has
+            // already been read by the person looking at this window, so the provider's
+            // count is ignored for it. See `ConversationThread.readThrough`.
+            if let readThrough = thread.readThrough, stamp <= readThrough {
+                thread.unreadCount = 0
+            } else {
+                thread.unreadCount = summary.unread
+            }
             if thread.messages.isEmpty { thread.snippet = summary.snippet }
             threads[key] = thread
         }
@@ -433,7 +475,9 @@ struct ConversationLog: Codable, Equatable {
         // Backfill arrives newest-page-first and can interleave with live arrivals.
         sortMessages(&thread)
         thread.lastActivity = max(thread.lastActivity, stamp)
-        if alerting && !m.outgoing && !m.read { thread.unreadCount += 1 }
+        if alerting, !m.outgoing, !m.read, stamp > (thread.readThrough ?? .distantPast) {
+            thread.unreadCount += 1
+        }
         trim(&thread)
         return .appended(key)
     }
@@ -535,7 +579,13 @@ struct ConversationLog: Codable, Equatable {
     // MARK: - Reading
 
     mutating func markRead(_ key: ConversationKey) {
-        threads[key]?.unreadCount = 0
+        guard var thread = threads[key] else { return }
+        thread.unreadCount = 0
+        // Monotonic: paging back through old history moves `lastActivity` nowhere, and a
+        // watermark that could move backwards would let an already-read thread light up
+        // again on the next summary.
+        thread.readThrough = max(thread.readThrough ?? .distantPast, thread.lastActivity)
+        threads[key] = thread
     }
 
     /// The only sanctioned way to address a reply.

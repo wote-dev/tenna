@@ -7,6 +7,7 @@
 **Your Android phone's notifications, messages, calls and clipboard, on your Mac.**
 Local-only. No account, no cloud service, no telemetry.
 
+[![CI](https://github.com/wote-dev/tenna/actions/workflows/ci.yml/badge.svg)](https://github.com/wote-dev/tenna/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)
 ![Android 13+](https://img.shields.io/badge/Android-13%2B-3ddc84)
@@ -220,8 +221,8 @@ as the default route — which is exactly the case when your Mac is sharing a co
 ### Pairing and trust
 
 On first launch the Mac generates a self-signed **RSA 2048** certificate and keeps the PKCS#12
-in the login Keychain. The QR carries the Mac's addresses, a SHA-256 of its public key, and a
-one-time pairing token. The phone pins that key with a custom `X509TrustManager` — it trusts
+in a 0600 file under Application Support, with its password in a 0600 file beside it. The QR
+carries the Mac's addresses, a SHA-256 of its public key, and a one-time pairing token. The phone pins that key with a custom `X509TrustManager` — it trusts
 that one key and nothing else — sends the token, and gets back a long-lived device token for
 every reconnect afterwards. A pin mismatch is fatal by design and is surfaced, not retried.
 
@@ -233,6 +234,13 @@ Two findings worth keeping, because they cost real time:
   `SecKeyCopyExternalRepresentation` returns — *not* the X.509 SubjectPublicKeyInfo that Java's
   `getEncoded()` gives. `CertPinning.kt` unwraps the SPKI to match, and the two sides were
   verified to produce byte-identical output.
+- **Not the login Keychain.** A `SecIdentity` only exists inside *some* keychain, and left to
+  itself `SecPKCS12Import` picks the login one — where the item's ACL names the importing app's
+  code signature. This app is ad-hoc signed, so every rebuild produced a new signature, a stale
+  ACL, and a *"Tennanova wants to sign using key"* password dialog. It now imports into an
+  app-owned keychain that never auto-locks, with an ACL that trusts all applications. See
+  `mac/Sources/TennaNova/Server/TLSIdentity.swift`, and [SECURITY.md](SECURITY.md) for what
+  that trade does and does not give away.
 
 ### Notifications, and replying to a conversation the phone has forgotten
 
@@ -316,8 +324,11 @@ that can host the room; the **phone** is handed only the room id, so it can join
 Knowing a room id buys someone a TCP pipe to the Mac's listener — exactly the exposure of being
 on the same LAN — and the pinned certificate and pairing token still guard the session.
 
-Builds default to a relay at `tennanova-relay.fly.dev`. **Run your own** — `relay/` deploys to
-Fly, Railway, Render or a VPS behind Caddy:
+Builds default to a relay at `tennanova-relay.fly.dev`. That is **the author's own instance**,
+run on a small Fly machine as a convenience so a fresh clone has a working fallback. It is
+best-effort with no uptime promise, it may be rate-limited or retired, and — as above — it
+cannot read a byte of what it carries. **Run your own** — `relay/` deploys to Fly, Railway,
+Render or a VPS behind Caddy:
 
 ```bash
 defaults write com.tennanova.mac relayHost my-relay.example.com
@@ -388,11 +399,31 @@ here, because it runs on the phone's default network, which stays cellular while
 
 **It connected before and now won't.** Check the menu bar: it lists the addresses currently
 being advertised. If the Mac has moved networks, the phone follows on its own — but a *pin
-mismatch* never retries, by design. That means the Mac's TLS identity changed (a new Keychain,
-a different Mac), and the fix is to unpair on both sides and scan a fresh QR.
+mismatch* never retries, by design. That means the Mac's TLS identity changed — a deleted
+`~/Library/Application Support/TennaNova/`, or a different Mac — and the fix is to unpair on
+both sides and scan a fresh QR.
 
 **Starting over.** Unpair from the Mac's device pane or its menu bar, or from the phone's
 dashboard. Either side mints a fresh pairing token and a new QR.
+
+**macOS keeps asking for your keychain password.** *"Tennanova wants to sign using key
+'Imported Private Key'"*, typically after waking the Mac or after a rebuild. Builds before this
+was fixed imported the TLS identity into your **login keychain** on every launch, leaving one
+certificate and key per build behind, each with an ACL tied to a code signature that no longer
+existed. Current builds keep the identity in a keychain of their own and clear those leftovers
+out on first run — so updating and relaunching once is the whole fix.
+
+An orphaned key whose certificate was already gone cannot be matched safely and is left alone.
+To check, and to clear it by hand:
+
+```bash
+security find-certificate -a -c "TennaNova Mac" ~/Library/Keychains/login.keychain-db
+```
+
+If anything is still listed, open **Keychain Access → login → Certificates**, and delete the
+`TennaNova Mac` entries and any orphaned `Imported Private Key` beside them. Nothing there is
+load-bearing: the identity the phone pins lives in
+`~/Library/Application Support/TennaNova/identity.p12`, and pairing survives untouched.
 
 **Logs.** The Mac:
 
@@ -419,6 +450,10 @@ web/                   the landing page (static, no build step)
 assets/icon/           icon masters — every app icon is generated from these
 tools/make-icons.sh    the generator
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) covers building, testing and the rule about changing the
+wire format. [SECURITY.md](SECURITY.md) covers what the threat model does and does not include,
+and how to report a vulnerability privately.
 
 ## Development
 

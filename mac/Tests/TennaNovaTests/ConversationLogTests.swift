@@ -530,6 +530,31 @@ struct SmsConversationTests {
         #expect(log[key]?.messages.map(\.body) == ["one", "two"])
     }
 
+    @Test func aReadSmsThreadStaysReadWhenThePhoneRepushesItsSummary() {
+        var log = ConversationLog()
+        log.applySmsThreads([makeSmsThread(unread: 3)])
+        log.markRead(key)
+        #expect(log[key]?.unreadCount == 0)
+
+        // Every reconnect re-pushes this, and the provider still counts those three as
+        // unread because reading on the Mac cannot mark them read on the phone. Before the
+        // watermark this is where the badge came back.
+        log.applySmsThreads([makeSmsThread(unread: 3)])
+
+        #expect(log[key]?.unreadCount == 0)
+    }
+
+    @Test func aNewTextAfterReadingStillRaisesTheBadge() {
+        var log = ConversationLog()
+        log.applySmsThreads([makeSmsThread(whenMs: 1_700_000_000_000, unread: 3)])
+        log.markRead(key)
+
+        // Newer than the watermark, so this is genuinely news.
+        log.applySmsThreads([makeSmsThread(whenMs: 1_700_000_060_000, unread: 1)])
+
+        #expect(log[key]?.unreadCount == 1)
+    }
+
     @Test func aTextSentFromTheMacIsConfirmedByTheRowThePhoneWrites() {
         var log = ConversationLog()
         log.applySmsThreads([makeSmsThread()])
@@ -707,6 +732,65 @@ struct SmsAddressMatchTests {
         #expect(log.conversationUnread == 1)
         #expect(log.alertUnread == 2)
         #expect(log.conversationUnread + log.alertUnread == log.totalUnread)
+    }
+
+    // MARK: - Reading, and badges that must not come back
+
+    @Test func aRepostedNotificationDoesNotRelightAReadThread() {
+        var log = ConversationLog()
+        // Android stamps a notification with when it was *raised*, and a repost of the same
+        // message carries that same stamp rather than the moment it was re-sent.
+        let posted: Int64 = 1_700_000_000_000
+        let notification = makeNotification(key: "k1", whenMs: posted)
+        let threadKey = ConversationKey(notification)
+        log.ingest(notification)
+        log.markRead(threadKey)
+
+        // Not a resync — several apps simply post the same message again when a chat
+        // updates. Nothing in it is newer than what has already been read on this Mac.
+        log.ingest(makeNotification(key: "k2", whenMs: posted))
+
+        #expect(log[threadKey]?.unreadCount == 0)
+    }
+
+    @Test func aLaterMessageInAReadThreadStillCounts() {
+        var log = ConversationLog()
+        let notification = makeNotification(key: "k1", whenMs: 1_700_000_000_000)
+        let threadKey = ConversationKey(notification)
+        log.ingest(notification)
+        log.markRead(threadKey)
+
+        log.ingest(makeNotification(key: "k2", body: "still there?",
+                                    whenMs: 1_700_000_060_000))
+
+        #expect(log[threadKey]?.unreadCount == 1)
+    }
+
+    // MARK: - Alerting
+
+    @Test func ourOwnReplyComingBackIsNotWorthAnAlert() {
+        var log = ConversationLog()
+        log.ingest(makeNotification(key: "k1", body: "are you close?"))
+        let threadKey = ConversationKey(makeNotification(key: "k1", body: "are you close?"))
+        log.appendOutgoing("five minutes", to: threadKey)
+
+        // WhatsApp re-posts its MessagingStyle notification once the reply goes out, and
+        // that post carries the line we just typed here.
+        let outcome = log.ingest(makeNotification(key: "k1", body: "five minutes"))
+
+        if case .reconciledOutgoing = outcome {} else {
+            Issue.record("expected the echo to reconcile, got \(outcome)")
+        }
+        #expect(outcome.deservesAnAlert == false)
+    }
+
+    @Test func aGenuineMessageIsWorthAnAlert() {
+        var log = ConversationLog()
+        let outcome = log.ingest(makeNotification(key: "k1", body: "are you close?"))
+        #expect(outcome.deservesAnAlert)
+        // A duplicate stays alertable here: judging duplicates is the replay guard's job,
+        // and it is the only thing that knows what Notification Center is holding.
+        #expect(IngestOutcome.duplicate.deservesAnAlert)
     }
 
     @Test func anythingWithAReplyButtonIsAConversation() {

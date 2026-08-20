@@ -99,8 +99,19 @@ final class NotificationStore {
         DispatchQueue.main.async { MainActor.assumeIsolated(work) }
     }
 
-    nonisolated func ingest(_ notification: NotifPosted) {
-        onMain { self.mutate { $0.ingest(notification) } }
+    /// Folds a mirrored notification into the transcript, and hands the caller what the
+    /// reducer made of it.
+    ///
+    /// The outcome is reported rather than discarded because whether macOS should *alert*
+    /// depends on it: see ``IngestOutcome/deservesAnAlert``. It arrives on the same ordered
+    /// main-thread hop as the mutation, so the decision is always made against the state the
+    /// ingest actually produced.
+    nonisolated func ingest(_ notification: NotifPosted,
+                            then: (@MainActor (IngestOutcome) -> Void)? = nil) {
+        onMain {
+            let outcome = self.mutating { $0.ingest(notification) }
+            then?(outcome)
+        }
     }
 
     nonisolated func markRemovedOnPhone(key: String) {

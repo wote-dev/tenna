@@ -95,7 +95,7 @@ struct NotificationCardText: Equatable {
 /// Tracks the last presentation reserved for each Android notification key. A
 /// reservation is made before handing content to macOS so two identical posts cannot
 /// race each other. Failed deliveries roll back to the previously delivered identity.
-struct NotificationReplayGuard {
+struct NotificationReplayGuard: Codable {
     struct Reservation {
         let key: String
         let fingerprint: String
@@ -111,6 +111,17 @@ struct NotificationReplayGuard {
     private var presented: [String: String] = [:]
     private var presentedOrder: [String] = []
     private let presentedLimit = 200
+
+    /// Only the presentation history crosses a launch, via `PresentationArchive`.
+    ///
+    /// `fingerprints` is deliberately left out: it answers "what is on screen *now*", and
+    /// the only honest source for that after a relaunch is `getDeliveredNotifications`,
+    /// which `NotificationPresenter` consults at startup anyway. Restoring a stale copy
+    /// would have the presenter believe cards exist that macOS threw away when it quit.
+    private enum CodingKeys: String, CodingKey {
+        case presented
+        case presentedOrder
+    }
 
     mutating func seed(key: String, fingerprint: String) {
         fingerprints[key] = fingerprint
@@ -309,13 +320,57 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
 
     private let lock = NSLock()
 
+    // MARK: - Persisting what has been shown
+
+    /// Long enough that the first connect after an install — which records every
+    /// notification the phone is holding — costs one write instead of a hundred.
+    static let saveDebounce: TimeInterval = 1
+
+    private let archive: PresentationArchive
+    private let saveQueue = DispatchQueue(label: "com.tennanova.presentation-archive",
+                                          qos: .utility)
+    /// Guarded by `lock`. A save that finds a newer generation waiting simply drops.
+    private var saveGeneration = 0
+
     /// The cache is injected so the presenter and the window read one store. Defaulted
     /// so the tests, which do not care, keep constructing this with no arguments.
-    init(icons: IconCache = IconCache()) {
+    init(icons: IconCache = IconCache(), archive: PresentationArchive = PresentationArchive()) {
         self.icons = icons
+        self.archive = archive
         super.init()
         center.delegate = self
+        // Before hydration, which adds whatever is still on screen to what we already knew.
+        if let restored = archive.load() { replayGuard = restored }
         hydrateDeliveredNotifications()
+    }
+
+    /// Writes the presentation history out shortly, coalescing bursts.
+    ///
+    /// Must not be called while `lock` is held — it takes it.
+    private func schedulePresentationSave() {
+        lock.lock()
+        saveGeneration += 1
+        let generation = saveGeneration
+        lock.unlock()
+
+        saveQueue.asyncAfter(deadline: .now() + Self.saveDebounce) { [weak self] in
+            guard let self else { return }
+            self.lock.lock()
+            guard self.saveGeneration == generation else { self.lock.unlock(); return }
+            let snapshot = self.replayGuard
+            self.lock.unlock()
+            self.archive.save(snapshot)
+        }
+    }
+
+    /// Unpairing. The next phone must not inherit this one's idea of what has been shown —
+    /// notification keys are not unique across devices.
+    func forgetPresentationHistory() {
+        lock.lock()
+        replayGuard = NotificationReplayGuard()
+        saveGeneration += 1
+        lock.unlock()
+        saveQueue.async { self.archive.delete() }
     }
 
     func requestAuthorization() {
@@ -388,6 +443,9 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
             self.hasHydratedDeliveredNotifications = true
             self.lock.unlock()
 
+            // What is on screen right now is evidence too, and on a first launch after
+            // this file gained an archive it is the only evidence there is.
+            self.schedulePresentationSave()
             self.processNextPresentationEvent()
         }
     }
@@ -437,6 +495,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         if legacyDeliveredPresentations.removeValue(forKey: n.key)?.matches(n) == true {
             replayGuard.seed(key: n.key, fingerprint: identity.fingerprint)
             lock.unlock()
+            schedulePresentationSave()
             Log.info("suppressed legacy replay: [\(n.appLabel)] \(n.title ?? "") — \(n.body ?? "")")
             finishPresentationEvent()
             return
@@ -447,6 +506,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
            replayGuard.hasPresented(key: n.key, fingerprint: identity.fingerprint) {
             replayGuard.seed(key: n.key, fingerprint: identity.fingerprint)
             lock.unlock()
+            schedulePresentationSave()
             Log.info("suppressed resync: [\(n.appLabel)] \(n.title ?? "") — \(n.body ?? "")")
             finishPresentationEvent()
             return
@@ -509,6 +569,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
                     fingerprint: identity.fingerprint
                 )
                 self.lock.unlock()
+                self.schedulePresentationSave()
                 Log.info("shown: [\(n.appLabel)] \(n.title ?? "") — \(n.body ?? "")")
             }
             self.finishPresentationEvent()
@@ -522,6 +583,7 @@ final class NotificationPresenter: NSObject, UNUserNotificationCenterDelegate {
         replayGuard.forget(key: key)
         legacyDeliveredPresentations.removeValue(forKey: key)
         lock.unlock()
+        schedulePresentationSave()
         center.removeDeliveredNotifications(withIdentifiers: [key])
         finishPresentationEvent()
     }

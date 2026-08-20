@@ -2,6 +2,9 @@
 # terminates TLS for us, which is what this needs. Any host that does the same works —
 # Railway, Render, a VPS behind Caddy. Serverless functions do not: they cap request
 # duration, and a Tennanova session is meant to idle for hours.
+# Change this before `fly deploy`: app names are global on Fly, and this one is taken by the
+# instance the Mac app points at by default. Then tell your Mac about yours:
+#   defaults write com.tennanova.mac relayHost my-relay.fly.dev
 app = "tennanova-relay"
 primary_region = "syd"
 

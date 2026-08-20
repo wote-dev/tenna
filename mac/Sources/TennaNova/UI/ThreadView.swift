@@ -246,7 +246,7 @@ struct MessageBubble: View {
                     // Not `.controlBackgroundColor`: in dark mode that is within a
                     // percent of the window's own background, and the incoming bubbles
                     // simply vanished. A tint of the foreground reads in both appearances.
-                    .background(isOurs ? Tenna.accentFill : Color.primary.opacity(0.09),
+                    .background(isOurs ? Tenna.accentFill : Tenna.incomingBubble,
                                 in: .rect(cornerRadius: 12))
                     .foregroundStyle(isOurs ? Color.white : Color.primary)
 
