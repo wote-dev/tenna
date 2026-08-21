@@ -82,6 +82,16 @@ class TennaNotificationListener : NotificationListenerService() {
 
     /** Reply/action plumbing for notifications currently on screen, keyed by SBN key. */
     private val actionMap = RetainedActions<List<Notification.Action>>()
+
+    /**
+     * What this phone has recently said on the Mac's behalf, keyed by the same SBN key.
+     *
+     * The last line of defence in [SelfMessage]: an app that re-posts a conversation
+     * carrying the reply we just fired is echoing us, whatever its notification looks
+     * like. Bounded and least-recently-used like the action map, and for the same reason —
+     * this service is long-lived.
+     */
+    private val ourReplies = RetainedActions<SelfMessage.SentReply>(OWN_REPLY_MEMORY)
     private val sms by lazy { SmsMirror(this) }
     /**
      * Live calls, and the intents that answer them. Fed from the notification stream
@@ -569,14 +579,25 @@ class TennaNotificationListener : NotificationListenerService() {
         if (!shouldMirror(sbn)) return
 
         val title = extras.getCharSequence(Notification.EXTRA_TITLE)?.toString()
-        val body = (extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
-            ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString()
-            ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
-                ?.joinToString("\n")
+        val body = bodyText(extras)
+        val messaging = messagingStyle(n)
+
+        // Our own words coming back. A messaging app answers a reply by re-posting the
+        // conversation with what you just said as its newest line, so mirroring this would
+        // alert you about your own message and — since the repost is titled with the
+        // speaker rather than the chat — file it under a conversation called "You".
+        if (SelfMessage.isOurOwn(selfPost(extras, messaging, title, body),
+                                 ourReplies.get(sbn.key), System.currentTimeMillis())) {
+            // The actions are kept even so. After a reconnect this repost is often the
+            // only sighting the phone gets of a chat, and dropping it whole would take the
+            // Mac's composer for that conversation with it.
+            n.actions?.let { actionMap.put(sbn.key, it.toList()) }
+            Log.i(TAG, "not mirroring ${sbn.packageName}: newest message is our own")
+            return
+        }
 
         val appLabel = appLabel(sbn.packageName)
         val iconHash = cacheIcon(sbn.packageName)
-        val messaging = messagingStyle(n)
 
         val actions = mutableListOf<NotifAction>()
         n.actions?.forEachIndexed { index, action ->
@@ -735,6 +756,37 @@ class TennaNotificationListener : NotificationListenerService() {
     private fun lastSender(style: NotificationCompat.MessagingStyle): String? =
         style.messages.lastOrNull()?.person?.name?.toString()?.takeIf { it.isNotBlank() }
 
+    /** The line the phone is showing, wherever this app chose to put it. */
+    private fun bodyText(extras: Bundle): String? =
+        (extras.getCharSequence(Notification.EXTRA_BIG_TEXT)
+            ?: extras.getCharSequence(Notification.EXTRA_TEXT))?.toString()
+            ?: extras.getCharSequenceArray(Notification.EXTRA_TEXT_LINES)
+                ?.joinToString("\n")
+
+    /** Everything [SelfMessage] needs, lifted out of a real notification. */
+    private fun selfPost(
+        extras: Bundle,
+        messaging: NotificationCompat.MessagingStyle?,
+        title: String?,
+        body: String?
+    ): SelfMessage.Post {
+        val last = messaging?.messages?.lastOrNull()
+        return SelfMessage.Post(
+            hasMessages = last != null,
+            lastSenderName = last?.person?.name?.toString(),
+            lastSenderKey = last?.person?.key,
+            selfName = messaging?.user?.name?.toString(),
+            selfKey = messaging?.user?.key,
+            title = title,
+            conversationTitle = messaging?.conversationTitle?.toString()
+                ?: extras.getCharSequence(Notification.EXTRA_CONVERSATION_TITLE)?.toString(),
+            body = body,
+            remoteInputHistory = extras
+                .getCharSequenceArray(Notification.EXTRA_REMOTE_INPUT_HISTORY)
+                ?.map { it.toString() } ?: emptyList()
+        )
+    }
+
     /**
      * Filters that keep the Mac quiet and duplicate-free.
      * Group summaries are the single biggest source of duplicates.
@@ -784,6 +836,11 @@ class TennaNotificationListener : NotificationListenerService() {
         }.toTypedArray()
 
         RemoteInput.addResultsToIntent(androidxInputs, intent, bundle)
+
+        // Before the intent, not after: the app can re-post the conversation with this
+        // very text before `send` has returned, and a repost that arrives before we have
+        // written this down is one the Mac would show as an incoming message.
+        ourReplies.put(key, SelfMessage.SentReply(text, System.currentTimeMillis()))
 
         try {
             action.actionIntent.send(this, 0, intent)
@@ -1056,6 +1113,8 @@ class TennaNotificationListener : NotificationListenerService() {
         /** Contact photos are the card's thumbnail, so they earn Retina pixels. */
         private const val AVATAR_PX = 256
         private const val MAX_ASSETS = 128
+        /** Conversations whose last outgoing reply is still remembered. */
+        private const val OWN_REPLY_MEMORY = 64
         /** One failed round is just a roaming Mac; a run of them is the network. */
         private const val ISOLATION_HINT_ROUNDS = 3
     }
