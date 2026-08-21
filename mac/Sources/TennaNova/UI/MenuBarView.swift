@@ -8,25 +8,27 @@ struct MenuBarView: View {
     @Environment(\.openWindow) private var openWindow
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 14) {
             header
-
-            Divider()
 
             // First, and above the connection detail: someone reaching for the menu bar
             // while their phone is ringing wants one of two buttons and nothing else.
             if let call = state.calls.current {
                 liveCall(call)
-                Divider()
+                    .padding(14)
+                    .contentSurface(.card, cornerRadius: 20)
             }
 
-            if state.status.isConnected {
-                connectedBody
-            } else {
-                waitingBody
+            Group {
+                if state.status.isConnected {
+                    connectedBody
+                } else {
+                    waitingBody
+                }
             }
-
-            Divider()
+            .padding(14)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentSurface(.inset, cornerRadius: 18)
 
             Button {
                 openWindow(id: AppScene.mainWindow)
@@ -37,6 +39,8 @@ struct MenuBarView: View {
                     .frame(maxWidth: .infinity)
             }
             .keyboardShortcut(.defaultAction)
+            .controlSize(.large)
+            .adaptiveGlassButton(prominent: true)
 
             HStack {
                 // Not gated on being connected: a stuck phone is exactly when unpairing
@@ -44,12 +48,15 @@ struct MenuBarView: View {
                 if state.isPaired {
                     Button("Unpair") { state.unpair() }
                 }
+                SettingsLink()
                 Spacer()
                 Button("Quit") { NSApplication.shared.terminate(nil) }
             }
+            .font(.caption)
         }
-        .padding(16)
-        .frame(width: 280)
+        .padding(18)
+        .frame(width: 310)
+        .background(TennaBackdrop())
     }
 
     /// The ringing or in-progress call, answerable without opening the window.
@@ -72,9 +79,9 @@ struct MenuBarView: View {
                     } label: {
                         Label("Answer", systemImage: "phone.fill")
                             .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.green)
+                }
+                .adaptiveGlassButton(prominent: true)
+                .tint(.green)
                 }
                 if call.canDecline {
                     Button(role: .destructive) {
@@ -100,10 +107,10 @@ struct MenuBarView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(state.status.isConnected ? Tenna.accent : Color.secondary)
-                .frame(width: 8, height: 8)
+        HStack(spacing: 11) {
+            SurfaceIcon(symbol: state.status.isConnected ? "iphone.badge.play" : "iphone.slash",
+                        tint: state.status.isConnected ? Tenna.accent : .secondary,
+                        size: 38)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Tennanova").font(.headline)
                 Text(headerStatus)

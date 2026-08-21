@@ -12,7 +12,12 @@ struct CallsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
+                PageHeader(title: "Calls",
+                           subtitle: "Answer and manage calls through your phone.",
+                           symbol: "phone.fill",
+                           tint: state.calls.isRinging ? .green : Tenna.accent)
+
                 ForEach(state.calls.live) { call in
                     CallCard(call: call)
                 }
@@ -39,7 +44,7 @@ struct CallsView: View {
                         }
                         .padding(.horizontal, 14)
                         .padding(.vertical, 6)
-                        .glassPanel(cornerRadius: 16)
+                        .contentSurface(.card, cornerRadius: 22)
 
                         Caption("Calls seen while this Mac was connected. The phone's own "
                                 + "call log is not read — that would need a permission "
@@ -47,10 +52,11 @@ struct CallsView: View {
                     }
                 }
             }
-            .padding(24)
-            .frame(maxWidth: 620, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .tennaScrollEdge(.top)
         .navigationTitle("Calls")
         .task { state.calls.markRecentsSeen() }
         // A call ending while this pane is open is being read as it lands, so the sidebar
@@ -63,26 +69,23 @@ struct CallsView: View {
     /// Nothing ringing. Which of the three reasons it is decides what is worth saying.
     @ViewBuilder
     private var idle: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !state.status.isConnected {
-                StatusRow("Waiting for your phone — calls arrive over the same connection.",
-                          symbol: "iphone.slash", font: .callout)
-            } else if !state.supportsCalls {
-                StatusRow("This phone is not sending calls.", symbol: "phone.badge.waveform",
-                          tint: .secondary, font: .callout)
-                Caption("Turn Calls on in Tennanova on the phone. It needs no new permission "
-                        + "there — a call is read from the notification your phone already "
-                        + "shows for it.")
-            } else {
-                StatusRow("No call right now.", symbol: "phone", font: .callout)
-                Caption("When your phone rings, this Mac rings with it — for phone calls and "
-                        + "for app calls like WhatsApp and Signal. You can answer, decline "
-                        + "and hang up from here. The audio stays on your phone.")
-            }
+        if !state.status.isConnected {
+            FriendlyEmptyState(title: "Waiting for your phone",
+                               message: "Calls arrive over the same secure connection as "
+                                        + "your messages and notifications.",
+                               symbol: "iphone.slash")
+        } else if !state.supportsCalls {
+            FriendlyEmptyState(title: "Calls are off on your phone",
+                               message: "Turn Calls on in Tennanova on Android. It needs no "
+                                        + "additional permission there.",
+                               symbol: "phone.badge.waveform",
+                               tint: .secondary)
+        } else {
+            FriendlyEmptyState(title: "Ready when your phone rings",
+                               message: "Phone, WhatsApp and Signal calls can be answered or "
+                                        + "declined here. Audio stays on your phone.",
+                               symbol: "phone")
         }
-        .padding(20)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassPanel(cornerRadius: 20)
     }
 }
 
@@ -118,7 +121,7 @@ struct CallCard: View {
                             .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .buttonStyle(.borderedProminent)
+                    .adaptiveGlassButton(prominent: true)
                     .tint(.green)
                     .keyboardShortcut(.defaultAction)
                 }
@@ -130,7 +133,7 @@ struct CallCard: View {
                             .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .buttonStyle(.bordered)
+                    .adaptiveGlassButton()
                 }
                 if call.canHangUp {
                     Button(role: .destructive) {
@@ -140,7 +143,7 @@ struct CallCard: View {
                             .frame(maxWidth: .infinity)
                     }
                     .controlSize(.large)
-                    .buttonStyle(.bordered)
+                    .adaptiveGlassButton()
                 }
             }
 
@@ -171,7 +174,7 @@ struct CallCard: View {
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassPanel(cornerRadius: 20)
+        .contentSurface(.card, cornerRadius: 24)
     }
 }
 
@@ -288,7 +291,7 @@ struct CallBanner: View {
                 Button { state.perform(.answer, on: call) } label: {
                     Label("Answer", systemImage: "phone.fill")
                 }
-                .buttonStyle(.borderedProminent)
+                .adaptiveGlassButton(prominent: true)
                 .tint(.green)
             }
             if call.canDecline {
@@ -306,7 +309,7 @@ struct CallBanner: View {
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
-        .glassPanel(cornerRadius: 14)
+        .adaptiveGlass(cornerRadius: 18)
         .padding(.horizontal, 12)
         .padding(.top, 10)
         .contentShape(.rect)

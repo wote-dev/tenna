@@ -105,6 +105,30 @@ func makeSmsThread(
     )
 }
 
+func makeSearchThread(
+    id: Int64 = 42,
+    pkg: String = ConversationKey.smsPseudoPackage,
+    appLabel: String = "Messages",
+    title: String = "Sam",
+    body: String = "are you close?",
+    address: String? = "+61491570006",
+    isConversation: Bool = true
+) -> ConversationThread {
+    ConversationThread(
+        id: .sms(threadId: id),
+        pkg: pkg,
+        appLabel: appLabel,
+        title: title,
+        messages: [MirroredMessage(notificationKey: nil, fingerprint: nil,
+                                   origin: .phone, senderName: nil, body: body,
+                                   when: TestClock.origin, avatarHash: nil,
+                                   delivery: .incoming)],
+        lastActivity: TestClock.origin,
+        smsAddress: address,
+        isConversation: isConversation
+    )
+}
+
 func makeCall(
     id: String = "0|com.dialer|1|null|1000",
     state: String = "ringing",

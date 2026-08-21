@@ -19,11 +19,16 @@ struct MainWindow: View {
     @Environment(\.openWindow) private var openWindow
     @State private var selection: SidebarItem? = .device
     @State private var dropTargeted = false
+    @State private var newMessage = false
+    @State private var searchRequest = 0
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
         NavigationSplitView {
-            ConversationList(selection: $selection)
-                .navigationSplitViewColumnWidth(min: 240, ideal: 300, max: 400)
+            ConversationList(selection: $selection, searchRequest: searchRequest) {
+                newMessage = true
+            }
+                .navigationSplitViewColumnWidth(min: 250, ideal: 310, max: 390)
         } detail: {
             detail
                 // Above the pane, not inside it: a ringing phone is the one thing here
@@ -31,7 +36,7 @@ struct MainWindow: View {
                 // from whichever conversation happens to be open.
                 .overlay(alignment: .top) { banner }
         }
-        .frame(minWidth: 700, minHeight: 420)
+        .frame(minWidth: 720, minHeight: 480)
         // The whole window, not just the Files pane. Dropping onto whichever pane happens
         // to be open is the gesture people actually make, and a drop target that only
         // works somewhere else is a drop target that looks broken.
@@ -44,18 +49,26 @@ struct MainWindow: View {
         } isTargeted: { dropTargeted = $0 }
         .overlay {
             if dropTargeted, state.supportsFileTransfer {
-                RoundedRectangle(cornerRadius: 12)
-                    .strokeBorder(Tenna.accent, lineWidth: 3)
-                    .padding(6)
+                FileDropOverlay()
+                    .padding(14)
                     .allowsHitTesting(false)
-                    .transition(.opacity)
+                    .transition(.scale(scale: 0.97).combined(with: .opacity))
             }
         }
-        .animation(.snappy(duration: 0.12), value: dropTargeted)
-        // The same backdrop the phone and the site draw. Everything above it is either a
-        // material or transparent, so the gradient is what shows through.
-        .background(Tenna.backdrop.ignoresSafeArea())
-        .navigationTitle("Tennanova")
+        .animation(reduceMotion ? nil : .snappy(duration: 0.18), value: dropTargeted)
+        .background(TennaBackdrop().tennaBackgroundExtension())
+        .tint(Tenna.accent)
+        // A scene command must be supplied by the whole split view. Attaching it only to
+        // the sidebar makes Command-N disappear whenever the detail pane owns focus.
+        .focusedSceneValue(\.newMessageAction,
+                           state.supportsSms ? { newMessage = true } : nil)
+        .focusedSceneValue(\.inboxSearchAction) { searchRequest += 1 }
+        .sheet(isPresented: $newMessage) {
+            NewMessageSheet { address in
+                guard let key = state.startSmsConversation(address: address) else { return }
+                selection = .thread(key)
+            }
+        }
         // Captured once, from the only place SwiftUI hands it out, and used from the app
         // delegate when the Dock icon is clicked with no window on screen.
         .task { MainWindowOpener.reopen = { openWindow(id: AppScene.mainWindow) } }
@@ -84,6 +97,27 @@ struct MainWindow: View {
             ThreadView(key: key).id(key)
         case .device, nil:
             DeviceView()
+        }
+    }
+}
+
+private struct FileDropOverlay: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            SurfaceIcon(symbol: "arrow.down.doc.fill", size: 64)
+            Text("Drop to send to your phone")
+                .font(.title3.weight(.semibold))
+            Text("Tennanova will open Files and show the transfer progress.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+        }
+        .padding(36)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .adaptiveGlass(cornerRadius: 28, interactive: false)
+        .overlay {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Tenna.accent.opacity(0.58),
+                              style: StrokeStyle(lineWidth: 2, dash: [8, 7]))
         }
     }
 }

@@ -24,30 +24,6 @@ enum Tenna {
     /// carries white at 5.15:1.
     static let accentFill = Color(.sRGB, red: 0.008, green: 0.451, blue: 0.690, opacity: 1)
 
-    /// The page backdrop, matching `Modifier.tennaBackdrop()` on Android and the site's
-    /// `135deg` gradient: pale cyan into sky into lavender.
-    static let backdrop = LinearGradient(
-        colors: [
-            Color(nsColor: NSColor(name: nil) { appearance in
-                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(srgbRed: 0.063, green: 0.094, blue: 0.153, alpha: 1)  // #101827
-                    : NSColor(srgbRed: 0.878, green: 0.918, blue: 0.988, alpha: 1)  // #E0EAFC
-            }),
-            Color(nsColor: NSColor(name: nil) { appearance in
-                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(srgbRed: 0.086, green: 0.125, blue: 0.227, alpha: 1)  // #16203A
-                    : NSColor(srgbRed: 0.812, green: 0.871, blue: 0.953, alpha: 1)  // #CFDEF3
-            }),
-            Color(nsColor: NSColor(name: nil) { appearance in
-                appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
-                    ? NSColor(srgbRed: 0.133, green: 0.114, blue: 0.227, alpha: 1)  // #221D3A
-                    : NSColor(srgbRed: 0.886, green: 0.831, blue: 0.941, alpha: 1)  // #E2D4F0
-            })
-        ],
-        startPoint: .topLeading,
-        endPoint: .bottomTrailing
-    )
-
     /// Picks between two values by appearance.
     ///
     /// `Tenna.accent` and `Tenna.backdrop` above spell this out longhand because they were
@@ -58,21 +34,49 @@ enum Tenna {
         })
     }
 
-    /// The hairline around a glass panel.
-    ///
-    /// Was a flat 50% white, which is a lit edge on a dark ground and very nearly nothing on
-    /// the pale light gradient — the panels lost their outline entirely in light mode. Light
-    /// mode gets a dark hairline instead, which is the same idea the other way up.
-    static let panelBorder = dynamic(
-        light: NSColor(srgbRed: 0.06, green: 0.09, blue: 0.16, alpha: 0.14),
-        dark:  NSColor(white: 1, alpha: 0.5)
+    static let canvasBase = dynamic(
+        light: NSColor(srgbRed: 0.925, green: 0.949, blue: 0.980, alpha: 1),
+        dark:  NSColor(srgbRed: 0.035, green: 0.051, blue: 0.086, alpha: 1)
     )
 
-    /// The tint under a glass panel's shadow. Pale ground shows a coloured shadow as a
-    /// bruise, so light mode drops most of it and keeps the lift.
-    static let panelShadow = dynamic(
-        light: NSColor(srgbRed: 0.06, green: 0.09, blue: 0.16, alpha: 0.10),
-        dark:  NSColor(srgbRed: 0.008, green: 0.451, blue: 0.690, alpha: 0.18)
+    static let skyGlow = dynamic(
+        light: NSColor(srgbRed: 0.50, green: 0.80, blue: 0.98, alpha: 0.46),
+        dark:  NSColor(srgbRed: 0.06, green: 0.36, blue: 0.62, alpha: 0.34)
+    )
+
+    static let lavenderGlow = dynamic(
+        light: NSColor(srgbRed: 0.77, green: 0.66, blue: 0.96, alpha: 0.30),
+        dark:  NSColor(srgbRed: 0.34, green: 0.20, blue: 0.58, alpha: 0.30)
+    )
+
+    static let warmGlow = dynamic(
+        light: NSColor(srgbRed: 1.00, green: 0.78, blue: 0.60, alpha: 0.17),
+        dark:  NSColor(srgbRed: 0.48, green: 0.22, blue: 0.20, alpha: 0.12)
+    )
+
+    static let surfaceBorder = dynamic(
+        light: NSColor(srgbRed: 0.08, green: 0.12, blue: 0.20, alpha: 0.11),
+        dark:  NSColor(white: 1, alpha: 0.18)
+    )
+
+    static let surfaceShadow = dynamic(
+        light: NSColor(srgbRed: 0.06, green: 0.10, blue: 0.18, alpha: 0.12),
+        dark:  NSColor(white: 0, alpha: 0.30)
+    )
+
+    static let opaqueSurface = dynamic(
+        light: NSColor(srgbRed: 0.965, green: 0.975, blue: 0.990, alpha: 1),
+        dark:  NSColor(srgbRed: 0.090, green: 0.108, blue: 0.155, alpha: 1)
+    )
+
+    static let selectionFill = dynamic(
+        light: NSColor(srgbRed: 0.12, green: 0.54, blue: 0.78, alpha: 0.18),
+        dark:  NSColor(srgbRed: 0.35, green: 0.72, blue: 0.94, alpha: 0.20)
+    )
+
+    static let separator = dynamic(
+        light: NSColor(srgbRed: 0.08, green: 0.12, blue: 0.20, alpha: 0.10),
+        dark:  NSColor(white: 1, alpha: 0.10)
     )
 
     /// The fill behind a message from the other person.
@@ -111,26 +115,183 @@ enum Tenna {
     }
 }
 
-/// One pane of frosted glass, the counterpart of `GlassSurface` on Android.
-///
-/// SwiftUI gives real backdrop blur here for free — `.ultraThinMaterial` samples what is
-/// actually behind it — which is why the Mac gets the effect the Compose side has to
-/// approximate with translucency alone.
-struct GlassPanel: ViewModifier {
-    var cornerRadius: CGFloat = 16
+/// A quiet ambient canvas. The colour underneath material is what gives glass life; this
+/// deliberately does not animate continuously, which keeps a utility window calm all day.
+struct TennaBackdrop: View {
+    var body: some View {
+        ZStack {
+            Tenna.canvasBase
+            RadialGradient(colors: [Tenna.skyGlow, .clear],
+                           center: .topLeading, startRadius: 30, endRadius: 620)
+            RadialGradient(colors: [Tenna.lavenderGlow, .clear],
+                           center: .bottomTrailing, startRadius: 20, endRadius: 700)
+            RadialGradient(colors: [Tenna.warmGlow, .clear],
+                           center: UnitPoint(x: 0.72, y: 0.10),
+                           startRadius: 10, endRadius: 440)
+        }
+        .ignoresSafeArea()
+        .accessibilityHidden(true)
+    }
+}
+
+enum TennaSurfaceRole {
+    case card
+    case inset
+}
+
+/// Standard material belongs to content; Liquid Glass is reserved for controls and
+/// navigation. Keeping those layers distinct prevents a screenful of equally shiny cards.
+struct ContentSurface: ViewModifier {
+    var role: TennaSurfaceRole = .card
+    var cornerRadius: CGFloat = 22
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
 
     func body(content: Content) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        let material = role == .card ? Material.thin : Material.ultraThin
         content
-            .background(.ultraThinMaterial, in: shape)
-            .overlay(shape.strokeBorder(Tenna.panelBorder, lineWidth: 1))
-            .shadow(color: Tenna.panelShadow, radius: 20, y: 10)
+            .background(reduceTransparency ? AnyShapeStyle(Tenna.opaqueSurface)
+                                           : AnyShapeStyle(material),
+                        in: shape)
+            .overlay(shape.strokeBorder(Tenna.surfaceBorder, lineWidth: 0.8))
+            .shadow(color: Tenna.surfaceShadow,
+                    radius: role == .card ? 18 : 8,
+                    y: role == .card ? 8 : 3)
+    }
+}
+
+/// An interactive layer. macOS 26 gets the system's optical Liquid Glass; macOS 14–15
+/// receive the same geometry and hierarchy using standard material.
+struct AdaptiveGlass: ViewModifier {
+    var cornerRadius: CGFloat = 16
+    var interactive = true
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(macOS 26.0, *) {
+            content.glassEffect(interactive ? .regular.interactive() : .regular, in: shape)
+        } else {
+            content
+                .background(reduceTransparency ? AnyShapeStyle(Tenna.opaqueSurface)
+                                               : AnyShapeStyle(Material.thin),
+                            in: shape)
+                .overlay(shape.strokeBorder(Tenna.surfaceBorder, lineWidth: 0.8))
+                .shadow(color: Tenna.surfaceShadow, radius: 12, y: 5)
+        }
     }
 }
 
 extension View {
+    func contentSurface(_ role: TennaSurfaceRole = .card,
+                        cornerRadius: CGFloat = 22) -> some View {
+        modifier(ContentSurface(role: role, cornerRadius: cornerRadius))
+    }
+
+    func adaptiveGlass(cornerRadius: CGFloat = 16, interactive: Bool = true) -> some View {
+        modifier(AdaptiveGlass(cornerRadius: cornerRadius, interactive: interactive))
+    }
+
+    /// Kept as a source-compatible bridge while views migrate from the original modifier.
     func glassPanel(cornerRadius: CGFloat = 16) -> some View {
-        modifier(GlassPanel(cornerRadius: cornerRadius))
+        contentSurface(.card, cornerRadius: cornerRadius)
+    }
+
+    @ViewBuilder
+    func adaptiveGlassButton(prominent: Bool = false) -> some View {
+        if #available(macOS 26.0, *) {
+            if prominent {
+                self.buttonStyle(.glassProminent)
+            } else {
+                self.buttonStyle(.glass)
+            }
+        } else if prominent {
+            self.buttonStyle(.borderedProminent)
+        } else {
+            self.buttonStyle(.bordered)
+        }
+    }
+
+    @ViewBuilder
+    func tennaBackgroundExtension() -> some View {
+        if #available(macOS 26.0, *) {
+            self.backgroundExtensionEffect()
+        } else {
+            self
+        }
+    }
+
+    @ViewBuilder
+    func tennaScrollEdge(_ edges: Edge.Set) -> some View {
+        if #available(macOS 26.0, *) {
+            self.scrollEdgeEffectStyle(.hard, for: edges)
+        } else {
+            self
+        }
+    }
+}
+
+struct SurfaceIcon: View {
+    let symbol: String
+    var tint: Color = Tenna.accent
+    var size: CGFloat = 42
+
+    var body: some View {
+        Image(systemName: symbol)
+            .font(.system(size: size * 0.40, weight: .semibold))
+            .foregroundStyle(tint)
+            .frame(width: size, height: size)
+            .background(tint.opacity(0.13), in: .rect(cornerRadius: size * 0.32,
+                                                       style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
+                    .strokeBorder(tint.opacity(0.16), lineWidth: 0.8)
+            }
+    }
+}
+
+struct PageHeader: View {
+    let title: String
+    let subtitle: String
+    let symbol: String
+    var tint: Color = Tenna.accent
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 14) {
+            SurfaceIcon(symbol: symbol, tint: tint, size: 48)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.title2.weight(.semibold))
+                Text(subtitle)
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+}
+
+struct FriendlyEmptyState: View {
+    let title: String
+    let message: String
+    let symbol: String
+    var tint: Color = Tenna.accent
+
+    var body: some View {
+        VStack(spacing: 12) {
+            SurfaceIcon(symbol: symbol, tint: tint, size: 58)
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity)
+        .contentSurface(.card, cornerRadius: 24)
     }
 }
 
@@ -253,7 +414,12 @@ struct PairingCode: View {
                     // Fixed white in both appearances, deliberately: a QR needs its light
                     // modules light and its quiet zone white, or a camera cannot read it.
                     .background(Color.white)
-                    .clipShape(.rect(cornerRadius: 10, style: .continuous))
+                    .padding(10)
+                    .background(Color.white, in: .rect(cornerRadius: 20, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .strokeBorder(Color.black.opacity(0.08), lineWidth: 1)
+                    }
             } else {
                 Text("Could not generate the pairing code.")
                     .font(.caption)
@@ -270,6 +436,7 @@ struct PairingCode: View {
                       systemImage: copied ? "checkmark" : "doc.on.doc")
                     .frame(maxWidth: .infinity)
             }
+            .adaptiveGlassButton()
         }
         .frame(maxWidth: .infinity)
     }
@@ -302,7 +469,11 @@ struct Avatar: View {
             }
         }
         .frame(width: size, height: size)
-        .clipShape(.rect(cornerRadius: size * 0.28))
+        .clipShape(.rect(cornerRadius: size * 0.32, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: size * 0.32, style: .continuous)
+                .strokeBorder(Tenna.surfaceBorder, lineWidth: 0.7)
+        }
     }
 }
 

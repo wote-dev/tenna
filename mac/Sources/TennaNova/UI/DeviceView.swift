@@ -1,8 +1,7 @@
 import SwiftUI
 
-/// The phone pane: pairing, reachability, battery, and what this build of the phone app
-/// can actually do. Everything here used to be inlined in the 280pt menu bar popover,
-/// where the QR had to compete with the connection diagnostics for room.
+/// Pairing, reachability, battery and capabilities presented as a proper Mac dashboard.
+/// Connection machinery remains in `AppState`; this view only gives that state hierarchy.
 struct DeviceView: View {
     @Environment(AppState.self) private var state
     @State private var showPairingAnyway = false
@@ -11,37 +10,25 @@ struct DeviceView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                header
+                hero
 
-                Group {
-                    if state.status.isConnected {
-                        connected
-                    } else if state.isPaired && !showPairingAnyway {
-                        // Not the QR. A paired phone that is merely offline used to land
-                        // here and be shown a pairing code, which reads as "you are not
-                        // paired" and sends people off to re-pair a pairing that was never
-                        // the problem.
-                        waiting
-                    } else {
-                        pairing
-                    }
+                if showPairingAnyway {
+                    pairing
+                } else if state.status.isConnected {
+                    connected
+                } else if state.isPaired {
+                    waiting
+                } else {
+                    pairing
                 }
-                .padding(20)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .glassPanel(cornerRadius: 20)
 
-                Divider()
-                appearance
-
-                if state.isPaired {
-                    Divider()
-                    Button("Unpair this phone…", role: .destructive) { confirmUnpair = true }
-                }
+                footer
             }
-            .padding(24)
-            .frame(maxWidth: 520, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: 920, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .tennaScrollEdge(.top)
         .confirmationDialog("Unpair \(state.pairedDeviceName ?? "your phone")?",
                             isPresented: $confirmUnpair) {
             Button("Unpair", role: .destructive) { state.unpair() }
@@ -50,7 +37,7 @@ struct DeviceView: View {
             Text("Tennanova will forget this phone and delete the conversations it "
                  + "mirrored. You will need to scan a new pairing code to reconnect.")
         }
-        .navigationTitle(state.pairedDeviceName ?? "Phone")
+        .navigationTitle(deviceName ?? "Phone")
     }
 
     private var deviceName: String? {
@@ -59,7 +46,7 @@ struct DeviceView: View {
 
     private var shortStatus: String {
         switch state.status {
-        case .connected:        return "Connected"
+        case .connected:        return "Connected and ready"
         case .starting:         return "Starting…"
         case .failed(let why):  return why
         case .waitingForPhone:
@@ -68,136 +55,224 @@ struct DeviceView: View {
         }
     }
 
-    // MARK: - Sections
+    private var hero: some View {
+        HStack(spacing: 16) {
+            SurfaceIcon(symbol: state.status.isConnected ? "iphone" : "iphone.slash",
+                        tint: state.status.isConnected ? Tenna.accent : .secondary,
+                        size: 62)
 
-    /// Light, dark or system. Here rather than in the menu bar popover, which is 280pt wide
-    /// and already has two buttons competing for the bottom of it.
-    private var appearance: some View {
-        @Bindable var state = state
-        return HStack {
-            Label("Appearance", systemImage: "circle.lefthalf.filled")
-            Spacer(minLength: 12)
-            Picker("Appearance", selection: $state.appearance) {
-                ForEach(AppAppearance.allCases) { Text($0.title).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(maxWidth: 220)
-        }
-        .font(.callout)
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            Image(systemName: state.status.isConnected ? "iphone" : "iphone.slash")
-                .font(.system(size: 30))
-                .foregroundStyle(state.status.isConnected ? Tenna.accent : .secondary)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(deviceName ?? "No phone paired")
+            VStack(alignment: .leading, spacing: 4) {
+                Text(deviceName ?? "Connect your Android phone")
                     .font(.title2.weight(.semibold))
-                // `status.label` names the device, which the line above already does.
-                Text(shortStatus)
-                    .font(.callout)
-                    .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(state.status.isConnected ? Color.green : Color.secondary)
+                        .frame(width: 7, height: 7)
+                    Text(shortStatus)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer(minLength: 16)
+
+            if let battery = state.battery {
+                Label("\(battery)%", systemImage: Tenna.batteryIcon(battery))
+                    .font(.callout.weight(.medium))
+                    .foregroundStyle(battery < 15 ? Color.red : .secondary)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(.primary.opacity(0.06), in: .capsule)
+                    .help(state.charging ? "Charging" : "Phone battery")
             }
         }
+        .padding(22)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contentSurface(.card, cornerRadius: 26)
     }
 
     private var connected: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if let battery = state.battery {
-                StatusRow("\(battery)%\(state.charging ? " — charging" : "")",
-                          symbol: Tenna.batteryIcon(battery),
-                          tint: battery < 15 ? .red : .secondary,
-                          font: .callout)
-            }
-            if let device = state.pairedDevice {
-                // Most phones report the model as their name, and repeating it is noise.
-                if let model = device.model, model != device.name {
-                    StatusRow(model, symbol: "cpu", font: .callout)
-                }
-                if let sdk = device.androidSdk {
-                    StatusRow("Android \(sdk)", symbol: "gear", font: .callout)
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 280, maximum: 430), spacing: 18)],
+                  alignment: .leading, spacing: 18) {
+            DashboardCard(title: "Connection", symbol: "point.3.connected.trianglepath.dotted") {
+                ReachabilityRows()
+                if let transfer = state.lastTransferStatus {
+                    StatusRow(transfer, symbol: "doc.on.clipboard")
                 }
             }
 
-            Divider()
-
-            Text("Connection").font(.headline)
-            ReachabilityRows()
-
-            if let transfer = state.lastTransferStatus {
-                StatusRow(transfer, symbol: "doc.on.clipboard")
+            DashboardCard(title: "Phone details", symbol: "cpu") {
+                if let battery = state.battery {
+                    StatusRow("\(battery)%\(state.charging ? " — charging" : "")",
+                              symbol: Tenna.batteryIcon(battery),
+                              tint: battery < 15 ? .red : .secondary,
+                              font: .callout)
+                }
+                if let device = state.pairedDevice {
+                    if let model = device.model, model != device.name {
+                        StatusRow(model, symbol: "iphone", font: .callout)
+                    }
+                    if let sdk = device.androidSdk {
+                        StatusRow("Android \(sdk)", symbol: "gear", font: .callout)
+                    }
+                }
             }
 
-            Divider()
-
-            Text("This phone supports").font(.headline)
-            StatusRow(state.supportsImageClipboard
-                        ? "Clipboard sync, including images"
-                        : "Clipboard sync, text only",
-                      symbol: "doc.on.clipboard",
-                      tint: Tenna.accent)
-            StatusRow("Mirrored notifications, with replies",
-                      symbol: "bell.badge",
-                      tint: Tenna.accent)
-            StatusRow(state.supportsCalls
-                        ? "Calls — answer, decline and hang up from here"
-                        : "Calls are switched off on the phone",
-                      symbol: state.supportsCalls ? "phone" : "phone.down",
-                      tint: state.supportsCalls ? Tenna.accent : .secondary)
-            StatusRow(state.supportsFileTransfer
-                        ? "Files — drop them on this window, or share to Tennanova there"
-                        : "File transfer needs a newer build on the phone",
-                      symbol: state.supportsFileTransfer ? "folder" : "folder.badge.questionmark",
-                      tint: state.supportsFileTransfer ? Tenna.accent : .secondary)
-            if state.supportsCalls {
-                Caption("Call audio stays on the phone. Android lets no app carry it to "
-                        + "a Mac, so this is a control surface — it rings, and it presses "
-                        + "the phone's buttons.")
+            DashboardCard(title: "What works", symbol: "sparkles") {
+                CapabilityRow(state.supportsImageClipboard
+                              ? "Clipboard, including images" : "Clipboard, text only",
+                              symbol: "doc.on.clipboard", available: true)
+                CapabilityRow("Notification replies", symbol: "bell.badge", available: true)
+                CapabilityRow("Call controls", symbol: "phone", available: state.supportsCalls)
+                CapabilityRow("File transfer", symbol: "folder", available: state.supportsFileTransfer)
             }
 
-            Button("Show pairing code") { showPairingAnyway = true }
-                .padding(.top, 4)
+            DashboardCard(title: "Pairing", symbol: "qrcode") {
+                Caption("Show the code again if you need to reconnect or are setting up "
+                        + "Tennanova after reinstalling the phone app.")
+                Button("Show pairing code") { showPairingAnyway = true }
+                    .adaptiveGlassButton()
+            }
         }
     }
 
     private var waiting: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ConnectionAttemptRow()
-            ReachabilityRows()
-
-            if !state.usbStatus.isReady && !state.relayStatus.isOnline {
-                Caption("Your phone must be able to reach one of those addresses. Many "
-                        + "networks block device-to-device traffic — a USB cable or the "
-                        + "phone's hotspot gets around that.")
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 300, maximum: 440), spacing: 18)],
+                  alignment: .leading, spacing: 18) {
+            DashboardCard(title: "Trying to reconnect", symbol: "antenna.radiowaves.left.and.right") {
+                ConnectionAttemptRow()
+                ReachabilityRows()
             }
 
-            Button("Show pairing code") { showPairingAnyway = true }
+            DashboardCard(title: "If it stays offline", symbol: "lightbulb.max") {
+                Caption("Your phone must be able to reach one of the listed routes. Some "
+                        + "networks block device-to-device traffic; USB or the phone's "
+                        + "hotspot gets around that.")
+                Button("Show pairing code") { showPairingAnyway = true }
+                    .adaptiveGlassButton()
+            }
         }
     }
 
     private var pairing: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Scan this with Tennanova on your phone")
-                .font(.headline)
+        VStack(spacing: 18) {
+            SurfaceIcon(symbol: "qrcode.viewfinder", size: 58)
+            VStack(spacing: 5) {
+                Text("Scan with Tennanova on your phone")
+                    .font(.title3.weight(.semibold))
+                Text("The code securely introduces this Mac and your phone.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+            }
 
-            ConnectionAttemptRow()
-
-            PairingCode(size: 260)
+            PairingCode(size: 250)
                 .frame(maxWidth: 300)
 
-            StatusRow(state.relayStatus.isOnline
-                        ? "Works on any local network, and over the internet when a "
-                          + "network blocks device-to-device traffic."
-                        : "Works on any local network shared by this Mac and your phone.",
-                      symbol: "network")
+            VStack(alignment: .leading, spacing: 8) {
+                PairingStep(number: 1, text: "Open Tennanova on Android.")
+                PairingStep(number: 2, text: "Choose Scan pairing code.")
+                PairingStep(number: 3, text: "Approve the one-time Android setup prompts.")
+            }
+            .frame(maxWidth: 420, alignment: .leading)
 
+            ConnectionAttemptRow()
             ReachabilityRows()
 
             if state.isPaired {
-                Button("Back") { showPairingAnyway = false }
+                Button("Back to device") { showPairingAnyway = false }
+                    .adaptiveGlassButton()
             }
+        }
+        .padding(28)
+        .frame(maxWidth: .infinity)
+        .contentSurface(.card, cornerRadius: 26)
+    }
+
+    private var footer: some View {
+        HStack {
+            SettingsLink {
+                Label("Settings", systemImage: "gear")
+            }
+            .adaptiveGlassButton()
+
+            Spacer()
+
+            if state.isPaired {
+                Menu {
+                    Button("Show pairing code") { showPairingAnyway = true }
+                    Divider()
+                    Button("Unpair this phone…", role: .destructive) { confirmUnpair = true }
+                } label: {
+                    Label("Device actions", systemImage: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+            }
+        }
+    }
+}
+
+private struct DashboardCard<Content: View>: View {
+    let title: String
+    let symbol: String
+    @ViewBuilder let content: () -> Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Label(title, systemImage: symbol)
+                .font(.headline)
+                .foregroundStyle(.primary)
+                .symbolRenderingMode(.hierarchical)
+            content()
+        }
+        .padding(20)
+        .frame(maxWidth: .infinity, minHeight: 150, alignment: .topLeading)
+        .contentSurface(.card, cornerRadius: 22)
+    }
+}
+
+private struct CapabilityRow: View {
+    let text: String
+    let symbol: String
+    let available: Bool
+
+    init(_ text: String, symbol: String, available: Bool) {
+        self.text = text
+        self.symbol = symbol
+        self.available = available
+    }
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Image(systemName: available ? symbol : "minus.circle")
+                .foregroundStyle(available ? AnyShapeStyle(Tenna.accent)
+                                           : AnyShapeStyle(.tertiary))
+                .frame(width: 18)
+            Text(text)
+                .font(.callout)
+                .foregroundStyle(available ? AnyShapeStyle(.primary)
+                                           : AnyShapeStyle(.secondary))
+            Spacer(minLength: 0)
+            Image(systemName: available ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(available ? AnyShapeStyle(Color.green)
+                                           : AnyShapeStyle(.tertiary))
+        }
+    }
+}
+
+private struct PairingStep: View {
+    let number: Int
+    let text: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("\(number)")
+                .font(.caption.weight(.bold))
+                .foregroundStyle(Tenna.accent)
+                .frame(width: 24, height: 24)
+                .background(Tenna.accent.opacity(0.13), in: .circle)
+            Text(text).font(.callout)
         }
     }
 }

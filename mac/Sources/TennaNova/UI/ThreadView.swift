@@ -14,13 +14,9 @@ struct ThreadView: View {
     var body: some View {
         Group {
             if let thread {
-                VStack(spacing: 0) {
-                    header(thread)
-                    Divider()
-                    transcript(thread)
-                    Divider()
-                    composer(thread)
-                }
+                transcript(thread)
+                    .safeAreaInset(edge: .bottom, spacing: 0) { composer(thread) }
+                    .navigationTitle(thread.title)
             } else {
                 // The log evicts the oldest threads past its cap, so a selection can
                 // outlive what it points at.
@@ -41,25 +37,28 @@ struct ThreadView: View {
         .onChange(of: thread?.messages.count) { _, _ in
             if thread?.unreadCount ?? 0 > 0 { state.history.markRead(key) }
         }
+        .toolbar {
+            if let thread {
+                ToolbarItem(placement: .principal) { toolbarIdentity(thread) }
+                ToolbarItem(placement: .primaryAction) { conversationMenu(thread) }
+            }
+        }
     }
 
     // MARK: - Header
 
-    private func header(_ thread: ConversationThread) -> some View {
+    private func toolbarIdentity(_ thread: ConversationThread) -> some View {
         HStack(spacing: 10) {
             Avatar(image: state.icons[thread.iconHash],
-                   monogram: thread.title.monogram, size: 34)
+                   monogram: thread.title.monogram, size: 30)
             VStack(alignment: .leading, spacing: 1) {
-                Text(thread.title).font(.headline)
+                Text(thread.title).font(.headline).lineLimit(1)
                 Text(headerSubtitle(thread))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(1)
             }
-            Spacer()
-            actionButtons(thread)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     /// SMS threads say the number, which is the useful thing when a contact has several
@@ -72,39 +71,35 @@ struct ThreadView: View {
         return Tenna.appName(thread.pkg, fallback: thread.appLabel)
     }
 
-    /// The notification's own non-reply buttons — "Mark as read", "Archive". They are
-    /// positional indices into the latest post, which is why they come from the thread
-    /// rather than from any message.
     @ViewBuilder
-    private func actionButtons(_ thread: ConversationThread) -> some View {
-        // An SMS thread has no notification behind it, so none of this applies to one.
-        if key.isSms {
-            EmptyView()
+    private func conversationMenu(_ thread: ConversationThread) -> some View {
+        if !key.isSms && hasConversationActions(thread) {
+            Menu {
+                if thread.isLiveOnPhone || state.supportsOfflineReply {
+                    ForEach(thread.latestActions.filter { !$0.isReply }, id: \.id) { action in
+                        Button(action.label) { state.invoke(action: action, in: key) }
+                    }
+                }
+                if thread.isLiveOnPhone {
+                    Divider()
+                    Button("Clear on phone", systemImage: "bell.slash") {
+                        state.dismissOnPhone(key)
+                    }
+                }
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+            .menuStyle(.borderlessButton)
+            .help("Conversation actions")
         } else {
-            notificationActionButtons(thread)
+            EmptyView()
         }
     }
 
-    @ViewBuilder
-    private func notificationActionButtons(_ thread: ConversationThread) -> some View {
-        // These fire the same retained PendingIntents the composer does, so they keep
-        // working after the notification is gone. Clearing one that is already gone does
-        // not, which is why the bell is the only thing still gated on it.
-        if thread.isLiveOnPhone || state.supportsOfflineReply {
-            ForEach(thread.latestActions.filter { !$0.isReply }, id: \.id) { action in
-                Button(action.label) { state.invoke(action: action, in: key) }
-                    .controlSize(.small)
-            }
-        }
-        if thread.isLiveOnPhone {
-            Button {
-                state.dismissOnPhone(key)
-            } label: {
-                Image(systemName: "bell.slash")
-            }
-            .controlSize(.small)
-            .help("Clear this notification on the phone")
-        }
+    private func hasConversationActions(_ thread: ConversationThread) -> Bool {
+        let hasNotificationButtons = (thread.isLiveOnPhone || state.supportsOfflineReply)
+            && thread.latestActions.contains { !$0.isReply }
+        return hasNotificationButtons || thread.isLiveOnPhone
     }
 
     // MARK: - Transcript
@@ -118,9 +113,12 @@ struct ThreadView: View {
                             .id(message.id)
                     }
                 }
-                .padding(16)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+                .frame(maxWidth: 820)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .tennaScrollEdge([.top, .bottom])
             .onChange(of: thread.messages.last?.id) { _, id in
                 guard let id else { return }
                 withAnimation { proxy.scrollTo(id, anchor: .bottom) }
@@ -138,28 +136,37 @@ struct ThreadView: View {
 
     @ViewBuilder
     private func composer(_ thread: ConversationThread) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
+        VStack(alignment: .leading, spacing: 8) {
             if let reason = unavailableReason(thread) {
                 StatusRow(reason, symbol: "info.circle")
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .contentSurface(.inset, cornerRadius: 14)
             } else {
                 HStack(spacing: 8) {
                     TextField("Message \(thread.title)", text: $draft, axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...6)
+                        .padding(.leading, 4)
                         .focused($composerFocused)
                         .onSubmit(send)
                     Button(action: send) {
-                        Image(systemName: "arrow.up.circle.fill")
-                            .font(.title2)
-                            .foregroundStyle(canSend ? Tenna.accent : Color.secondary)
+                        Image(systemName: "arrow.up")
+                            .font(.system(size: 14, weight: .bold))
+                            .frame(width: 20, height: 20)
                     }
-                    .buttonStyle(.plain)
+                    .adaptiveGlassButton(prominent: true)
                     .disabled(!canSend)
+                    .help("Send message")
                 }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 9)
+                .adaptiveGlass(cornerRadius: 18)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 18)
+        .padding(.top, 10)
+        .padding(.bottom, 14)
     }
 
     private var canSend: Bool {
@@ -217,6 +224,7 @@ struct ThreadView: View {
 /// One message. Ours on the right in brand teal, the phone's on the left.
 struct MessageBubble: View {
     @Environment(AppState.self) private var state
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let message: MirroredMessage
     let threadTitle: String
 
@@ -241,14 +249,20 @@ struct MessageBubble: View {
 
                 Text(message.body)
                     .textSelection(.enabled)
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 13)
+                    .padding(.vertical, 8)
                     // Not `.controlBackgroundColor`: in dark mode that is within a
                     // percent of the window's own background, and the incoming bubbles
                     // simply vanished. A tint of the foreground reads in both appearances.
                     .background(isOurs ? Tenna.accentFill : Tenna.incomingBubble,
-                                in: .rect(cornerRadius: 12))
+                                in: .rect(cornerRadius: 18, style: .continuous))
                     .foregroundStyle(isOurs ? Color.white : Color.primary)
+                    .overlay {
+                        if !isOurs {
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .strokeBorder(Tenna.surfaceBorder, lineWidth: 0.6)
+                        }
+                    }
 
                 HStack(spacing: 4) {
                     Text(message.when.formatted(date: .omitted, time: .shortened))
@@ -264,6 +278,7 @@ struct MessageBubble: View {
             if !isOurs { Spacer(minLength: 60) }
         }
         .frame(maxWidth: .infinity, alignment: isOurs ? .trailing : .leading)
+        .animation(reduceMotion ? nil : .snappy(duration: 0.20), value: message.delivery)
     }
 
     /// `sent` and `confirmed` are deliberately different words. The protocol has no ack

@@ -56,3 +56,41 @@ enum AppAppearance: String, CaseIterable, Identifiable {
         NSApp.appearance = nsAppearance
     }
 }
+
+/// The app only has one preference today, but giving it the native Settings home keeps the
+/// device dashboard about the device and earns the standard Command-comma entry point.
+struct AppearanceSettingsView: View {
+    @Environment(AppState.self) private var state
+
+    var body: some View {
+        @Bindable var state = state
+        VStack(alignment: .leading, spacing: 18) {
+            PageHeader(title: "Appearance",
+                       subtitle: "Choose how Tennanova looks on this Mac.",
+                       symbol: "circle.lefthalf.filled")
+
+            Picker("Appearance", selection: $state.appearance) {
+                ForEach(AppAppearance.allCases) { appearance in
+                    Label(appearance.title, systemImage: symbol(for: appearance))
+                        .tag(appearance)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            Caption("System follows the appearance selected in macOS. The menu bar window "
+                    + "and the main window always use the same choice.")
+        }
+        .padding(24)
+        .frame(width: 440)
+        .background(TennaBackdrop())
+    }
+
+    private func symbol(for appearance: AppAppearance) -> String {
+        switch appearance {
+        case .system: return "circle.lefthalf.filled"
+        case .light:  return "sun.max.fill"
+        case .dark:   return "moon.fill"
+        }
+    }
+}

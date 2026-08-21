@@ -86,6 +86,18 @@ made it that way, and the comment saying which platform and how is the part that
 person a day. Comments that restate the code are not wanted; comments recording a constraint you
 had to discover experimentally are.
 
+### macOS interface
+
+The Mac app still supports macOS 14. Native Liquid Glass APIs start at macOS 26, so every use
+must sit behind an availability check and keep a standard-material fallback with the same shape,
+spacing and interaction. Use Liquid Glass for controls and navigation; use `contentSurface` for
+cards in the content layer rather than making every panel compete for attention.
+
+Before shipping a UI change, check light and dark appearances plus Reduce Motion, Reduce
+Transparency and Increased Contrast. The window must remain usable at its 720×480 minimum, with
+the sidebar hidden, and from the keyboard. Never commit screenshots made from a real mirrored
+inbox; use sanitised data for public documentation and bug reports.
+
 ## Security
 
 Please do not open a public issue for a vulnerability. See [SECURITY.md](SECURITY.md).

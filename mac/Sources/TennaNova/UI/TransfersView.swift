@@ -13,7 +13,7 @@ struct TransfersView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 20) {
                 header
 
                 if state.transfers.items.isEmpty {
@@ -43,7 +43,7 @@ struct TransfersView: View {
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 6)
-                            .glassPanel(cornerRadius: 16)
+                            .contentSurface(.card, cornerRadius: 22)
                         }
                     }
                 }
@@ -54,10 +54,11 @@ struct TransfersView: View {
                         + "interrupted by a dropped connection carries on from where it "
                         + "stopped rather than starting again.")
             }
-            .padding(24)
-            .frame(maxWidth: 620, alignment: .leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(28)
+            .frame(maxWidth: 820, alignment: .leading)
+            .frame(maxWidth: .infinity, alignment: .center)
         }
+        .tennaScrollEdge(.top)
         .navigationTitle("Files")
         .task { state.transfers.markSeen() }
         // A transfer finishing while this pane is open is being read as it lands, so the
@@ -72,34 +73,41 @@ struct TransfersView: View {
     }
 
     private var header: some View {
-        HStack(spacing: 10) {
-            Button("Send Files…") { picking = true }
+        HStack(alignment: .center, spacing: 18) {
+            PageHeader(title: "Files",
+                       subtitle: "Move files securely in either direction.",
+                       symbol: "folder.fill")
+            Spacer(minLength: 16)
+            Button {
+                picking = true
+            } label: {
+                Label("Send Files", systemImage: "paperplane.fill")
+            }
                 .disabled(!state.supportsFileTransfer)
-            Spacer()
+                .adaptiveGlassButton(prominent: true)
         }
     }
 
     /// Nothing has moved yet. Which of the three reasons it is decides what is worth saying.
     @ViewBuilder
     private var empty: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            if !state.status.isConnected {
-                StatusRow("Waiting for your phone — files go over the same connection.",
-                          symbol: "iphone.slash", font: .callout)
-            } else if !state.supportsFileTransfer {
-                StatusRow("This phone's build cannot transfer files yet. Update the app "
-                          + "on the phone.",
-                          symbol: "exclamationmark.triangle", font: .callout)
-            } else {
-                StatusRow("Drop files anywhere on this window to send them to the phone.",
-                          symbol: "arrow.down.doc", font: .callout)
-                StatusRow("On the phone, share anything to Tennanova to send it here.",
-                          symbol: "square.and.arrow.up", font: .callout)
-            }
+        if !state.status.isConnected {
+            FriendlyEmptyState(title: "Waiting for your phone",
+                               message: "Files use the same secure connection. Tennanova "
+                                        + "will be ready as soon as your phone reconnects.",
+                               symbol: "iphone.slash")
+        } else if !state.supportsFileTransfer {
+            FriendlyEmptyState(title: "File transfer needs an update",
+                               message: "Install a newer Tennanova build on your Android "
+                                        + "phone to send and receive files.",
+                               symbol: "exclamationmark.triangle",
+                               tint: .orange)
+        } else {
+            FriendlyEmptyState(title: "Drop a file anywhere",
+                               message: "Drop files on this window to send them. On Android, "
+                                        + "share anything to Tennanova to bring it here.",
+                               symbol: "arrow.down.doc")
         }
-        .padding(18)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .glassPanel(cornerRadius: 20)
     }
 }
 
@@ -144,7 +152,7 @@ private struct TransferCard: View {
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .glassPanel(cornerRadius: 20)
+        .contentSurface(.card, cornerRadius: 24)
     }
 }
 

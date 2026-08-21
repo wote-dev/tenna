@@ -14,14 +14,16 @@ struct TennaNovaApp: App {
             MainWindow()
                 .environment(delegate.state)
         }
-        .defaultSize(width: 980, height: 640)
+        .defaultSize(width: 1080, height: 700)
         // Without this the window tracks the *content's* ideal size, which means switching
         // from the device pane to a transcript resizes the window under the user — and a
         // long enough transcript grew it past the bottom of the screen, taking the
         // composer with it.
         .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified(showsTitle: true))
         .commands {
             CommandGroup(before: .windowList) { OpenMainWindowButton() }
+            TennaCommands()
         }
 
         MenuBarExtra {
@@ -40,6 +42,12 @@ struct TennaNovaApp: App {
                           : "iphone.slash")
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            AppearanceSettingsView()
+                .environment(delegate.state)
+        }
+        .defaultSize(width: 440, height: 220)
     }
 }
 
@@ -70,6 +78,44 @@ struct OpenMainWindowButton: View {
             NSApp.activate(ignoringOtherApps: true)
         }
         .keyboardShortcut("0", modifiers: .command)
+    }
+}
+
+struct NewMessageActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+struct InboxSearchActionKey: FocusedValueKey {
+    typealias Value = () -> Void
+}
+
+extension FocusedValues {
+    var newMessageAction: NewMessageActionKey.Value? {
+        get { self[NewMessageActionKey.self] }
+        set { self[NewMessageActionKey.self] = newValue }
+    }
+
+    var inboxSearchAction: InboxSearchActionKey.Value? {
+        get { self[InboxSearchActionKey.self] }
+        set { self[InboxSearchActionKey.self] = newValue }
+    }
+}
+
+struct TennaCommands: Commands {
+    @FocusedValue(\.newMessageAction) private var newMessage
+    @FocusedValue(\.inboxSearchAction) private var searchInbox
+
+    var body: some Commands {
+        CommandGroup(replacing: .newItem) {
+            Button("New Message") { newMessage?() }
+                .keyboardShortcut("n", modifiers: .command)
+                .disabled(newMessage == nil)
+        }
+        CommandGroup(after: .textEditing) {
+            Button("Search Inbox") { searchInbox?() }
+                .keyboardShortcut("f", modifiers: .command)
+                .disabled(searchInbox == nil)
+        }
     }
 }
 
