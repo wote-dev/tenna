@@ -43,6 +43,11 @@ enum TLSIdentity {
         supportDir.appendingPathComponent("identity.keychain-db")
     }
 
+    /// The live keychain and the token that opens it, kept so ``ensureUnlocked()`` can
+    /// reach them again long after `loadOrCreate` returned.
+    private static var openKeychain: SecKeychain?
+    private static var keychainPassword: String?
+
     struct Loaded {
         let identity: SecIdentity
         let secIdentity: sec_identity_t
@@ -208,19 +213,20 @@ enum TLSIdentity {
             throw TLSError.message("could not open the identity keychain (OSStatus \(status))")
         }
 
-        // The half of the fix that answers "it comes back whenever I leave my Mac". A
-        // keychain that never relocks — not on sleep, not on a timer — is never in a state
-        // that needs a password to get back into.
-        var settings = SecKeychainSettings(version: UInt32(SEC_KEYCHAIN_SETTINGS_VERS1),
-                                           lockOnSleep: false,
-                                           useLockInterval: false,
-                                           lockInterval: .max)
-        SecKeychainSetSettings(kc, &settings)
-
-        // Explicit, so a keychain somehow left locked still opens silently.
+        // Explicit, so a keychain somehow left locked still opens silently — and it has to
+        // come *first*: `SecKeychainSetSettings` below is refused on a locked keychain.
         _ = password.withCString { pw in
             SecKeychainUnlock(kc, UInt32(strlen(pw)), pw, true)
         }
+
+        // The half of the fix that answers "it comes back whenever I leave my Mac". A
+        // keychain that never relocks — not on sleep, not on a timer — is never in a state
+        // that needs a password to get back into.
+        applyNoAutoLock(kc)
+
+        // Remembered so ``ensureUnlocked()`` can reach this keychain again later.
+        openKeychain = kc
+        keychainPassword = password
 
         // Security creates it 0644. It holds the same private key as the p12 beside it, so
         // it gets the same 0600 the p12 has rather than the default.
@@ -229,6 +235,68 @@ enum TLSIdentity {
 
         removeFromSearchList(kc, path: path)
         return kc
+    }
+
+    /// Re-opens the identity keychain if it has locked itself, before the key is needed.
+    ///
+    /// A locked keychain does not fail anywhere you would look for it. The listener stays
+    /// up, `sec_identity_t` stays valid, Bonjour keeps advertising — Network.framework
+    /// just cannot sign the ServerHello, so every handshake dies before one byte reaches
+    /// the phone and the Mac reports the opaque `-9858 handshake failed` instantly,
+    /// forever. Called on each inbound connection because that is the only moment the
+    /// private key is actually used.
+    @discardableResult
+    static func ensureUnlocked() -> Bool {
+        guard let keychain = openKeychain, let password = keychainPassword else { return false }
+
+        var status = SecKeychainStatus()
+        if SecKeychainGetStatus(keychain, &status) == errSecSuccess,
+           status & UInt32(kSecUnlockStateStatus) != 0 {
+            return true
+        }
+
+        // As in `loadOrCreate`: a call that would prompt must fail instead. Nobody is
+        // watching for a password box that opens because a phone tried to connect.
+        SecKeychainSetUserInteractionAllowed(false)
+        defer { SecKeychainSetUserInteractionAllowed(true) }
+
+        let unlocked = password.withCString { pw in
+            SecKeychainUnlock(keychain, UInt32(strlen(pw)), pw, true)
+        }
+        guard unlocked == errSecSuccess else {
+            Log.error("could not unlock the identity keychain (OSStatus \(unlocked)); "
+                      + "TLS handshakes will fail until Tennanova is restarted")
+            return false
+        }
+
+        // It should not have locked at all, so whatever relocked it may also have dropped
+        // the settings. Re-assert them rather than unlocking again every single time.
+        Log.info("the identity keychain had locked itself; reopened it before the handshake")
+        applyNoAutoLock(keychain)
+        return true
+    }
+
+    /// Turns off both of a keychain's automatic locks, and says so when it cannot.
+    ///
+    /// Two details here are load-bearing, and both were wrong until a Mac that had been
+    /// running for five minutes could no longer complete a single handshake:
+    ///
+    ///  - The keychain must already be **unlocked**. Called before the unlock, this
+    ///    returns `errSecAuthFailed`.
+    ///  - The "never time out" sentinel is `Int32.max`. `UInt32.max` is not accepted and
+    ///    fails the same way.
+    ///
+    /// Neither failure is visible — the settings simply stay at the 5-minute default — so
+    /// the status is checked and logged rather than discarded.
+    private static func applyNoAutoLock(_ keychain: SecKeychain) {
+        var settings = SecKeychainSettings(version: UInt32(SEC_KEYCHAIN_SETTINGS_VERS1),
+                                           lockOnSleep: false,
+                                           useLockInterval: false,
+                                           lockInterval: UInt32(Int32.max))
+        let status = SecKeychainSetSettings(keychain, &settings)
+        guard status != errSecSuccess else { return }
+        Log.error("could not disable the identity keychain's auto-lock (OSStatus \(status)); "
+                  + "it will relock on a timer and pairing will fail until then")
     }
 
     /// Takes our keychain back out of the user's search list.

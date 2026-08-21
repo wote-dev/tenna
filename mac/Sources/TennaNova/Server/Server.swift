@@ -139,6 +139,11 @@ final class Server {
     }
 
     private func accept(_ conn: NWConnection) {
+        // The handshake starts inside `peer.start()` below, and it is the only thing that
+        // needs the private key. A keychain that has locked itself since launch makes that
+        // handshake fail before a byte reaches the phone, so this is the moment to check.
+        TLSIdentity.ensureUnlocked()
+
         let peer = PeerSession(connection: conn, queue: queue)
         let peerID = peer.id
         peers[peerID] = peer
@@ -169,13 +174,25 @@ final class Server {
                 if case .failed = self.activity {
                     // AppState already supplied the useful authentication reason.
                 } else {
-                    let reason = error?.localizedDescription
-                        ?? "Phone disconnected before pairing completed."
-                    self.emitActivity(.failed(reason), clearAfter: 12)
+                    self.emitActivity(.failed(Self.explain(error)), clearAfter: 12)
                 }
             }
         }
         peer.start()
+    }
+
+    /// Turns a dropped candidate into something a person can act on.
+    ///
+    /// `NWError` renders a TLS failure as "handshake failed" and a bare number, which says
+    /// nothing about which side refused or what to do about it — and this is the message
+    /// the menu shows when pairing does not work, so it is the one that has to be useful.
+    private static func explain(_ error: Error?) -> String {
+        guard let error else { return "Phone disconnected before pairing completed." }
+        if let nw = error as? NWError, case .tls = nw {
+            return "Couldn't secure the connection. If the phone is paired to a different "
+                 + "Mac, scan the pairing code again."
+        }
+        return error.localizedDescription
     }
 
     private func emitActivity(_ next: ServerActivity, clearAfter seconds: TimeInterval? = nil) {
