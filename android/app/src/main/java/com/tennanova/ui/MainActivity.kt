@@ -14,7 +14,11 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.SystemBarStyle
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
+import android.content.pm.PackageManager
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -67,6 +71,20 @@ class MainActivity : ComponentActivity() {
             }
         }
     }
+
+    /**
+     * A shared image, waiting on the user to say what they meant by it. Held in state
+     * rather than shown from here so it survives a rotation like every other dialog.
+     */
+    private var pendingImageShare by mutableStateOf<Pair<Uri, String>?>(null)
+
+    /**
+     * Denial is an answer, not a failure: the transfer still runs and the dashboard still
+     * lists it, so there is nothing to send anyone to Settings for.
+     */
+    private val notificationPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
 
     private fun setSmsEnabled(enabled: Boolean) {
         if (!enabled) {
@@ -177,7 +195,23 @@ class MainActivity : ComponentActivity() {
                     onSetSmsEnabled = ::setSmsEnabled,
                     onSetCallsEnabled = ::setCallsEnabled,
                     onGrantCallControl = ::requestCallControl,
+                    onCancelTransfer = RuntimeStatusStore::cancelTransfer,
+                    onClearTransfers = RuntimeStatusStore::clearFinishedTransfers,
                 )
+
+                pendingImageShare?.let { (uri, mime) ->
+                    SharedImageChoice(
+                        onClipboard = {
+                            pendingImageShare = null
+                            deliverToClipboard(ClipboardPayload.ImageReference(uri, mime, null))
+                        },
+                        onFile = {
+                            pendingImageShare = null
+                            deliverAsFiles(listOf(uri))
+                        },
+                        onDismiss = { pendingImageShare = null }
+                    )
+                }
             }
         }
     }
@@ -216,27 +250,78 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    /**
+     * Everything shared into this app, routed by what it is.
+     *
+     * Text goes to the clipboard, which is what Share → Tennanova has always meant and
+     * what `PROTOCOL.md` documents as the fallback for apps whose copy action exposes no
+     * signal. Anything that is not text or an image is a file for the Mac.
+     *
+     * An image is the one genuinely ambiguous case — a screenshot shared to paste on the
+     * Mac and a photo shared to keep there are the same intent — so it asks. Guessing
+     * either way would silently take one of the two away.
+     */
     private fun consumeSharedContent(intent: Intent?) {
-        if (intent?.action != Intent.ACTION_SEND || shareConsumed) return
+        val action = intent?.action
+        if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return
+        if (shareConsumed) return
         shareConsumed = true
-        val payload = when {
-            intent.type?.startsWith("image/") == true -> {
-                @Suppress("DEPRECATION")
-                val uri = intent.getParcelableExtra<android.net.Uri>(Intent.EXTRA_STREAM)
-                uri?.let { ClipboardPayload.ImageReference(it, intent.type!!, null) }
-            }
-            else -> intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
-                ?.takeIf { it.isNotEmpty() }?.let(ClipboardPayload::Text)
+
+        val uris = sharedUris(intent)
+        val text = intent.getCharSequenceExtra(Intent.EXTRA_TEXT)?.toString()
+            ?.takeIf { it.isNotEmpty() }
+        val isImage = intent.type?.startsWith("image/") == true
+
+        when {
+            uris.isEmpty() && text != null -> deliverToClipboard(ClipboardPayload.Text(text))
+
+            uris.isEmpty() -> viewModel.setMessage("That shared item is not supported.")
+
+            isImage && uris.size == 1 ->
+                pendingImageShare = uris.first() to (intent.type ?: "image/*")
+
+            else -> deliverAsFiles(uris)
         }
-        if (payload != null) {
-            val sent = RuntimeStatusStore.clipboardChanged(payload)
-            viewModel.setMessage(
-                if (sent) "Shared clipboard item sent to your Mac."
-                else "Connect to your Mac, then share this item again."
-            )
+    }
+
+    @Suppress("DEPRECATION")
+    private fun sharedUris(intent: Intent): List<Uri> =
+        if (intent.action == Intent.ACTION_SEND_MULTIPLE) {
+            intent.getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM).orEmpty()
         } else {
-            viewModel.setMessage("That shared item is not supported.")
+            listOfNotNull(intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM))
         }
+
+    private fun deliverToClipboard(payload: ClipboardPayload) {
+        val sent = RuntimeStatusStore.clipboardChanged(payload)
+        viewModel.setMessage(
+            if (sent) "Shared clipboard item sent to your Mac."
+            else "Connect to your Mac, then share this item again."
+        )
+    }
+
+    private fun deliverAsFiles(uris: List<Uri>) {
+        val sent = RuntimeStatusStore.sendFiles(uris)
+        viewModel.setMessage(
+            if (sent && uris.size == 1) "Sending that file to your Mac."
+            else if (sent) "Sending ${uris.size} files to your Mac."
+            else "Connect to your Mac, then share this again."
+        )
+        if (sent) askForNotificationPermissionOnce()
+    }
+
+    /**
+     * Asked the first time a transfer is started rather than during onboarding: until
+     * someone has actually moved a file, a prompt about file notifications is a question
+     * about a feature they have not used.
+     */
+    private fun askForNotificationPermissionOnce() {
+        if (viewModel.hasAskedAboutFileNotifications) return
+        viewModel.hasAskedAboutFileNotifications = true
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+            == PackageManager.PERMISSION_GRANTED
+        ) return
+        notificationPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
 
     private fun scanQr() {

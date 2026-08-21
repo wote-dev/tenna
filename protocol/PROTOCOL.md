@@ -387,7 +387,9 @@ immediately followed by one binary frame of exactly `bytes` bytes:
  "mime":"image/png","bytes":145281,"sha256":"<lowercase hex>","name":"shot.png"}
 ```
 
-- One image is transferred at a time; generic files and multi-item clips are not supported.
+- One image is transferred at a time; multi-item clips are not supported. Generic files
+  have their own channel — see [Files](#files--capability-filev1) — and the clipboard
+  deliberately does not grow into one.
 - Image payloads are capped at 25 MiB. Sources above that are optimized before sending.
 - Receivers validate the advertised length and SHA-256 before publishing the image clipboard.
 - Android publishes received images as a scoped `content://` stream rather than a filename.
@@ -420,6 +422,83 @@ immediately followed by one binary frame of exactly `bytes` bytes:
   authenticated, and **Share → Tennanova** is the fallback when an app exposes no copy signal.
 - Clipboard does not sync while the phone is locked (`isDeviceLocked` short-circuits reads in
   `ClipboardService`). This is expected, not a bug.
+
+## Files — capability `file.v1`
+
+Generic file transfer, both directions, over the same socket. The clipboard carries one image
+at a time and stays that way; this is the channel for everything else.
+
+Advertised by both ends. A peer that does not advertise `file.v1` is never sent a `file.*`
+message, and a sender whose peer lacks it says so rather than queueing bytes nobody will read.
+
+```jsonc
+// sender -> receiver, one file. Queued files are offered one at a time per direction.
+{"v":1,"type":"file.offer","id":"9F3B…","name":"screen-20250817-005420.mp4",
+ "bytes":14417920,"mime":"video/mp4","sha256":"<lowercase hex>","modified":1723900000000}
+
+// receiver -> sender: go ahead, and from where. offset > 0 resumes a partial file.
+{"v":1,"type":"file.begin","id":"9F3B…","offset":0}
+
+// sender -> receiver, immediately followed by ONE binary frame of exactly `bytes` bytes
+{"v":1,"type":"file.chunk","id":"9F3B…","offset":3145728,"bytes":262144}
+
+// receiver -> sender, every 4 chunks and after the last one
+{"v":1,"type":"file.ack","id":"9F3B…","received":3407872}
+
+// sender -> receiver: that was the last chunk
+{"v":1,"type":"file.done","id":"9F3B…"}
+
+// receiver -> sender, after hashing what actually landed
+{"v":1,"type":"file.result","id":"9F3B…","ok":true}
+{"v":1,"type":"file.result","id":"9F3B…","ok":false,"error":"checksum mismatch"}
+
+// either direction, at any point
+{"v":1,"type":"file.cancel","id":"9F3B…","reason":"user|too_large|disk|unsupported|gone|protocol"}
+```
+
+**Chunks are 262144 bytes** (the last one is short). A whole-file frame was not an option and
+the size is not arbitrary: the relay re-chunks everything at 32 KiB with 2 MiB of backpressure
+on the phone and 64 KiB on the Mac, and OkHttp closes a socket whose outbound queue passes
+16 MiB. 256 KiB also means a 14 MB video moves the progress bar 55 times instead of once.
+
+**A `file.chunk` header and its binary frame are one indivisible pair**, exactly as
+`icon.data` and `clip.image` already are. Both senders guarantee it — the Mac queues both
+frames inside one block on its serial connection queue, Android sends both under one lock — and
+both receivers depend on it, because a binary frame carries no id of its own and is attributed
+to the last header that asked for one. That is also why a receiver kills the session on a
+second binary-expecting header while one is still outstanding: the alternative is silently
+writing one transfer's bytes into another's file.
+
+**Flow control is the ack window.** The sender may have at most 16 chunks (4 MiB) unacked, and
+`file.ack` is what returns credit. It doubles as the resume point and as the sender's own
+progress figure, so a sender's percentage reflects what the receiver actually wrote rather than
+what the sender queued.
+
+**`sha256` covers the whole file and travels in the offer, not the completion.** The sender
+therefore reads the file once before the first byte moves — visible as a *Preparing* state on
+a large file — and in exchange a resumed transfer can be *verified* rather than assumed: a
+partial is only continued when `id`, `sha256` and `bytes` all match what is being re-offered.
+The receiver hashes what it wrote and answers `file.result`; a mismatch is reported, and the
+file is not published.
+
+**Files are capped at 2 GiB.** A larger `bytes` is answered with
+`file.cancel reason:"too_large"`. The receiver also checks free space before answering
+`file.begin`, and refuses with `reason:"disk"` rather than filling a disk and failing at 99%.
+
+**A disconnect pauses a transfer; it does not fail it.** Both ends keep the partial file and
+the offer. After the next `hello.ack` the sender re-offers the same `id`, the receiver answers
+with the offset it already holds, and the transfer continues. `file.cancel reason:"gone"` is
+what a sender sends when the source file has disappeared underneath it in the meantime.
+
+**Names arrive off the wire and are not trusted.** A receiver stages every transfer under its
+own `id`, never under the peer's filename, and sanitises the name only at the point of
+publishing: no path separators, no `..`, no NUL, no leading dot, length capped, and the
+resolved path confirmed to still be inside the destination directory.
+
+**Where files land.** The Mac writes to `~/Downloads`, de-duplicating a colliding name the way
+a browser does. Android publishes into the public `Downloads` collection through `MediaStore`,
+which on API 33+ needs no storage permission; it stages in its own cache directory first, which
+is what lets a resume survive the app being killed.
 
 ## Versioning
 

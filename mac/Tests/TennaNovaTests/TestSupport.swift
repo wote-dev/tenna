@@ -128,3 +128,34 @@ func makeCall(
         resync: resync, actions: actions
     )
 }
+
+func makeTransfer(
+    id: String = "a1b2c3d4",
+    direction: TransferDirection = .toPhone,
+    name: String = "notes.txt",
+    bytes: Int = 1024,
+    mime: String = "text/plain",
+    sha256: String? = nil,
+    startedAtMs: Int = 1_700_000_000_000
+) -> Transfer {
+    Transfer(id: id, direction: direction, name: name, bytes: bytes, mime: mime,
+             sha256: sha256, startedAt: startedAtMs)
+}
+
+func makeOffer(
+    id: String = "a1b2c3d4",
+    name: String = "notes.txt",
+    bytes: Int = 1024,
+    mime: String = "text/plain",
+    sha256: String = String(repeating: "b", count: 64),
+    modifiedMs: Int64? = nil
+) -> FileOffer {
+    FileOffer(id: id, name: name, bytes: bytes, mime: mime, sha256: sha256,
+              modified: modifiedMs)
+}
+
+/// Lowercase hex, so tests can mint ids that `Proto.isTransferID` accepts without naming
+/// a formatter.
+func hexID(_ value: Int) -> String {
+    String(format: "%08x", value)
+}

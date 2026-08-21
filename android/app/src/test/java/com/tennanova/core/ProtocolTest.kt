@@ -237,4 +237,88 @@ class ProtocolTest {
             Messages.callActionResult(null, "k", CallAction.HANGUP, true, null).has("error")
         )
     }
+
+    // MARK: - Files
+
+    private val fileOffer = FileOfferHeader(
+        id = "a1b2c3d4", name = "screen-20250817-005420.mp4", bytes = 14_417_920L,
+        mime = "video/mp4", sha256 = "b".repeat(64), modified = 1_723_900_000_000L
+    )
+
+    @Test fun helloAdvertisesFileTransfer() {
+        val hello = Messages.hello("id", "Phone", "Model", 36, 90, token, null)
+        val capabilities = hello.getJSONArray("capabilities")
+        val advertised = (0 until capabilities.length()).map { capabilities.getString(it) }
+        assertTrue(advertised.contains(Proto.FILE_TRANSFER_CAPABILITY))
+    }
+
+    @Test fun fileOfferRoundTrips() {
+        val json = Messages.fileOffer(fileOffer)
+        assertEquals("file.offer", json.getString("type"))
+        assertEquals(Proto.VERSION, json.getInt("v"))
+        assertEquals(fileOffer, FileOfferHeader.parse(json))
+    }
+
+    @Test fun `a modification time is omitted rather than nulled`() {
+        val json = Messages.fileOffer(fileOffer.copy(modified = null))
+        // Absent rather than null: the Mac decodes this into an optional.
+        assertFalse(json.has("modified"))
+        assertNull(FileOfferHeader.parse(json)?.modified)
+    }
+
+    @Test fun fileOfferValidationIsStrict() {
+        assertTrue(fileOffer.isValid)
+        assertFalse(fileOffer.copy(bytes = 0).isValid)
+        assertFalse(fileOffer.copy(bytes = Proto.MAX_FILE_BYTES + 1).isValid)
+        assertFalse(fileOffer.copy(sha256 = "B".repeat(64)).isValid)
+        assertFalse(fileOffer.copy(id = "abc").isValid)
+        assertFalse(fileOffer.copy(id = "not hex!").isValid)
+        assertFalse(fileOffer.copy(mime = "x".repeat(101)).isValid)
+    }
+
+    /**
+     * The name is the one field a hostile peer controls that could name a path. The offer
+     * is refused outright rather than repaired, and nothing is ever stored under it.
+     */
+    @Test fun `a name that could name a path is refused`() {
+        assertFalse(fileOffer.copy(name = "../../.ssh/authorized_keys").isValid)
+        assertFalse(fileOffer.copy(name = "sub/dir.txt").isValid)
+        assertFalse(fileOffer.copy(name = "windows\\path.txt").isValid)
+        assertFalse(fileOffer.copy(name = "..").isValid)
+        assertFalse(fileOffer.copy(name = "").isValid)
+        assertFalse(fileOffer.copy(name = "n".repeat(256)).isValid)
+        // Legitimate names that merely look alarming still pass.
+        assertTrue(fileOffer.copy(name = "..notes..txt").isValid)
+        assertTrue(fileOffer.copy(name = "r\u00e9sum\u00e9 (final) [v2].pdf").isValid)
+    }
+
+    @Test fun chunkHeaderRoundTripsAndBoundsItself() {
+        val json = Messages.fileChunk("a1b2c3d4", 3_145_728L, 262_144)
+        assertEquals("file.chunk", json.getString("type"))
+        assertEquals(
+            FileChunkHeader("a1b2c3d4", 3_145_728L, 262_144),
+            FileChunkHeader.parse(json)
+        )
+        assertFalse(FileChunkHeader("a1b2c3d4", -1L, 1).isValid)
+        assertFalse(FileChunkHeader("a1b2c3d4", 0L, Proto.FILE_CHUNK_BYTES + 1).isValid)
+        assertFalse(FileChunkHeader("a1b2c3d4", 0L, 0).isValid)
+    }
+
+    @Test fun beginAckAndDoneCarryWhatTheyMust() {
+        assertEquals(0L, Messages.fileBegin("a1b2c3d4", 0L).getLong("offset"))
+        assertEquals(3_407_872L, Messages.fileAck("a1b2c3d4", 3_407_872L).getLong("received"))
+        assertEquals("file.done", Messages.fileDone("a1b2c3d4").getString("type"))
+        assertEquals("user", Messages.fileCancel("a1b2c3d4", "user").getString("reason"))
+    }
+
+    @Test fun aSuccessfulFileResultCarriesNoErrorKey() {
+        val ok = Messages.fileResult("a1b2c3d4", true, null)
+        assertTrue(ok.getBoolean("ok"))
+        // Absent rather than null: the Mac decodes this into an optional.
+        assertFalse(ok.has("error"))
+
+        val bad = Messages.fileResult("a1b2c3d4", false, "checksum mismatch")
+        assertFalse(bad.getBoolean("ok"))
+        assertEquals("checksum mismatch", bad.getString("error"))
+    }
 }

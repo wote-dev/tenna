@@ -51,10 +51,60 @@ object Proto {
      * sound stays on this phone.
      */
     const val CALL_CAPABILITY = "call.v1"
+
+    /**
+     * Generic file transfer, both directions, chunked and resumable.
+     *
+     * The clipboard carries one image at a time and stays that way; this is the channel
+     * for everything else. Advertised unconditionally: receiving needs no permission on
+     * API 33+ (`MediaStore` writes into the public Downloads collection), and sending is
+     * driven by the user sharing something into this app.
+     */
+    const val FILE_TRANSFER_CAPABILITY = "file.v1"
+
     const val MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
+    /**
+     * The largest file either end will accept. Beyond this the staging copy this app makes
+     * in its own cache stops being a reasonable thing to keep on a phone.
+     */
+    const val MAX_FILE_BYTES = 2L * 1024 * 1024 * 1024
+
+    /**
+     * One `file.chunk` body. Not arbitrary: the relay re-chunks at 32 KiB with 2 MiB of
+     * backpressure, OkHttp closes a socket whose outbound queue passes 16 MiB, and a
+     * whole-file frame would move the progress bar exactly once.
+     */
+    const val FILE_CHUNK_BYTES = 256 * 1024
+
+    /** How many chunks a sender may have unacked. `file.ack` returns the credit. */
+    const val FILE_WINDOW_CHUNKS = 16
+
+    /** How often a receiver acks — often enough to keep the window full, no more. */
+    const val FILE_ACK_EVERY_CHUNKS = 4
+
     /** Everything this build can do. SMS is added per-connection once it is switched on. */
-    val CAPABILITIES = listOf(IMAGE_CLIPBOARD_CAPABILITY, OFFLINE_REPLY_CAPABILITY)
+    val CAPABILITIES =
+        listOf(IMAGE_CLIPBOARD_CAPABILITY, OFFLINE_REPLY_CAPABILITY, FILE_TRANSFER_CAPABILITY)
+
+    /**
+     * A transfer id. Hex only, so it can name a staging file without escaping the
+     * directory it belongs in.
+     */
+    fun isTransferId(value: String): Boolean =
+        value.length in 8..64 && value.all { it in '0'..'9' || it in 'a'..'f' }
+
+    /**
+     * A filename off the wire, checked before it is stored anywhere. This is the refusal
+     * bar, not the sanitiser: a name that passes here is still rewritten by
+     * `TransferPlan.safeFilename` before anything is written under it.
+     */
+    fun isValidTransferName(value: String): Boolean {
+        val bytes = value.toByteArray(Charsets.UTF_8).size
+        if (bytes !in 1..255) return false
+        if (value == "." || value == "..") return false
+        return value.none { it == '/' || it == '\\' || it == '\u0000' }
+    }
 
     fun envelope(type: String): JSONObject =
         JSONObject().put("v", VERSION).put("type", type)
@@ -343,6 +393,43 @@ object Messages {
             .put("bytes", image.bytes)
             .put("sha256", image.sha256)
             .apply { image.name?.let { put("name", it) } }
+
+    // Files — see `protocol/PROTOCOL.md`, "Files".
+
+    fun fileOffer(offer: FileOfferHeader): JSONObject = Proto.envelope("file.offer")
+        .put("id", offer.id)
+        .put("name", offer.name)
+        .put("bytes", offer.bytes)
+        .put("mime", offer.mime)
+        .put("sha256", offer.sha256)
+        .apply { offer.modified?.let { put("modified", it) } }
+
+    fun fileBegin(id: String, offset: Long): JSONObject = Proto.envelope("file.begin")
+        .put("id", id)
+        .put("offset", offset)
+
+    fun fileChunk(id: String, offset: Long, bytes: Int): JSONObject =
+        Proto.envelope("file.chunk")
+            .put("id", id)
+            .put("offset", offset)
+            .put("bytes", bytes)
+
+    fun fileAck(id: String, received: Long): JSONObject = Proto.envelope("file.ack")
+        .put("id", id)
+        .put("received", received)
+
+    fun fileDone(id: String): JSONObject = Proto.envelope("file.done").put("id", id)
+
+    /** `error` is absent rather than null on success: the Mac decodes it into an optional. */
+    fun fileResult(id: String, ok: Boolean, error: String?): JSONObject =
+        Proto.envelope("file.result")
+            .put("id", id)
+            .put("ok", ok)
+            .apply { if (!ok && error != null) put("error", error.take(200)) }
+
+    fun fileCancel(id: String, reason: String): JSONObject = Proto.envelope("file.cancel")
+        .put("id", id)
+        .put("reason", reason)
 }
 
 data class ClipImageHeader(
@@ -368,6 +455,65 @@ data class ClipImageHeader(
                 bytes = obj.getInt("bytes"),
                 sha256 = obj.getString("sha256").lowercase(),
                 name = obj.optString("name").take(120).takeIf { it.isNotBlank() }
+            ).takeIf { it.isValid }
+        }.getOrNull()
+    }
+}
+
+/**
+ * Announces one file. Answered with `file.begin`, or `file.cancel` if this end will not
+ * take it.
+ *
+ * `sha256` covers the whole file and is in the offer rather than in `file.done`
+ * deliberately: it costs the sender one read pass before the first byte moves, and it is
+ * what lets a resumed transfer be verified rather than assumed.
+ */
+data class FileOfferHeader(
+    val id: String,
+    val name: String,
+    val bytes: Long,
+    val mime: String,
+    val sha256: String,
+    /** Source modification time, epoch millis. Advisory; the receiver may ignore it. */
+    val modified: Long?
+) {
+    val isValid: Boolean
+        get() = Proto.isTransferId(id) && bytes in 1..Proto.MAX_FILE_BYTES &&
+            mime.length in 1..100 && Proto.isValidTransferName(name) &&
+            sha256.length == 64 && sha256.all { it in '0'..'9' || it in 'a'..'f' }
+
+    companion object {
+        fun parse(obj: JSONObject): FileOfferHeader? = runCatching {
+            FileOfferHeader(
+                id = obj.getString("id").lowercase(),
+                name = obj.getString("name"),
+                bytes = obj.getLong("bytes"),
+                mime = obj.getString("mime"),
+                sha256 = obj.getString("sha256").lowercase(),
+                modified = if (obj.has("modified")) obj.getLong("modified") else null
+            ).takeIf { it.isValid }
+        }.getOrNull()
+    }
+}
+
+/**
+ * Metadata for one chunk. The next binary frame carries exactly `bytes` bytes.
+ *
+ * There is no id inside the binary frame, which is why header and body are sent as one
+ * indivisible pair and why a second one arriving while this is outstanding is fatal to the
+ * session: the alternative is writing one transfer's bytes into another's file.
+ */
+data class FileChunkHeader(val id: String, val offset: Long, val bytes: Int) {
+    val isValid: Boolean
+        get() = Proto.isTransferId(id) && offset >= 0 &&
+            bytes in 1..Proto.FILE_CHUNK_BYTES
+
+    companion object {
+        fun parse(obj: JSONObject): FileChunkHeader? = runCatching {
+            FileChunkHeader(
+                id = obj.getString("id").lowercase(),
+                offset = obj.getLong("offset"),
+                bytes = obj.getInt("bytes")
             ).takeIf { it.isValid }
         }.getOrNull()
     }

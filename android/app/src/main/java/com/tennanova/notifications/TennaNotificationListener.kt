@@ -52,6 +52,9 @@ import com.tennanova.net.SocketClient
 import com.tennanova.net.MacDiscovery
 import com.tennanova.net.SubnetScanner
 import org.json.JSONObject
+import com.tennanova.files.FileTransfers
+import com.tennanova.files.FileTransport
+import com.tennanova.files.TransferNotifier
 import java.io.ByteArrayOutputStream
 import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicInteger
@@ -71,7 +74,25 @@ class TennaNotificationListener : NotificationListenerService() {
     private var socket: SocketClient? = null
     private var authenticated = false
     private var peerSupportsImages = false
-    private var pendingImage: ClipImageHeader? = null
+    private var peerSupportsFiles = false
+
+    /**
+     * The one header still waiting for its binary frame.
+     *
+     * Still a single slot, not a map, and a second header arriving while one is
+     * outstanding is fatal to the session: a binary frame carries no id, so it can only be
+     * attributed to the header immediately before it. Both senders queue a header and its
+     * body as one indivisible pair, which is what makes that safe.
+     */
+    private var pendingBinary: PendingBinary? = null
+
+    private sealed interface PendingBinary {
+        data class Image(val header: ClipImageHeader) : PendingBinary
+        data class FileChunk(val header: com.tennanova.core.FileChunkHeader) : PendingBinary
+    }
+
+    private var files: FileTransfers? = null
+    private var notifier: TransferNotifier? = null
     private var networkCallbackRegistered = false
     private var allNetworksCallbackRegistered = false
     /** Live all-network NSD results. Unlike persisted hosts these retain their exact route. */
@@ -150,6 +171,21 @@ class TennaNotificationListener : NotificationListenerService() {
         relay = RelayBridge(this) {
             settings.relayTarget?.let { (host, room) -> RelayBridge.RelayTarget(host, room) }
         }
+        notifier = TransferNotifier(this)
+        files = FileTransfers(
+            context = this,
+            transport = object : FileTransport {
+                override fun sendJson(message: JSONObject): Boolean =
+                    socket?.send(message) == true
+
+                override fun sendChunk(header: JSONObject, body: ByteArray): Boolean =
+                    socket?.sendBinary(header, body) == true
+            },
+            onChanged = RuntimeStatusStore::updateTransfers,
+            onArrived = { item, uri -> notifier?.arrived(item, uri) },
+            onSummary = RuntimeStatusStore::transfer
+        ).also { it.sweepStaleStaging() }
+
         RuntimeStatusStore.attach(this)
         RuntimeStatusStore.updatePairing(settings.isPairingConfirmed, settings.macName)
         RuntimeStatusStore.updateClipboard(
@@ -393,7 +429,12 @@ class TennaNotificationListener : NotificationListenerService() {
                         array.optString(it) == Proto.IMAGE_CLIPBOARD_CAPABILITY
                     }
                 } == true
-                RuntimeStatusStore.updatePeerCapabilities(peerSupportsImages)
+                peerSupportsFiles = msg.optJSONArray("capabilities")?.let { array ->
+                    (0 until array.length()).any {
+                        array.optString(it) == Proto.FILE_TRANSFER_CAPABILITY
+                    }
+                } == true
+                RuntimeStatusStore.updatePeerCapabilities(peerSupportsImages, peerSupportsFiles)
                 exhaustedRounds = 0
                 socket?.sessionAuthenticated()
                 setAuthenticated(true)
@@ -402,6 +443,10 @@ class TennaNotificationListener : NotificationListenerService() {
                 activeNotifications?.forEach { handlePosted(it, resync = true) }
                 startSmsMirror()
                 publishCallStatus()
+                // Anything paused by the last disconnect is re-offered under the same id,
+                // so a transfer interrupted by a walk out of Wi-Fi range picks up where it
+                // stopped rather than starting over.
+                files?.sessionReady(peerSupportsFiles)
                 // After the replay, and not before: the replay is what repopulates the
                 // action map for everything still on the phone's shade. Anything the user
                 // cleared before this service last started is genuinely unreplyable, and
@@ -515,32 +560,80 @@ class TennaNotificationListener : NotificationListenerService() {
             "clip.image" -> {
                 val header = ClipImageHeader.parse(msg)
                 if (!peerSupportsImages || header == null || header.origin != "mac" ||
-                    pendingImage != null) {
+                    pendingBinary != null) {
                     RuntimeStatusStore.transfer("Image rejected", "Invalid image metadata")
-                    pendingImage = null
+                    pendingBinary = null
                 } else {
-                    pendingImage = header
+                    pendingBinary = PendingBinary.Image(header)
+                }
+            }
+
+            "file.offer" -> files?.onOffer(msg)
+            "file.begin" -> files?.onBegin(msg)
+            "file.ack" -> files?.onAck(msg)
+            "file.done" -> files?.onDone(msg)
+            "file.result" -> files?.onResult(msg)
+            "file.cancel" -> files?.onCancel(msg)
+
+            "file.chunk" -> {
+                val header = com.tennanova.core.FileChunkHeader.parse(msg)
+                if (header == null || pendingBinary != null) {
+                    // Writing one transfer's bytes into another's file is worse than
+                    // losing the session, so this is not something to recover from.
+                    Log.w(TAG, "invalid or interleaved file.chunk header")
+                    pendingBinary = null
+                    socket?.stop()
+                } else {
+                    pendingBinary = PendingBinary.FileChunk(header)
                 }
             }
         }
     }
 
     private fun handleBinary(bytes: ByteArray) {
-        val header = pendingImage
-        pendingImage = null
-        if (!authenticated || header == null || bytes.size != header.bytes ||
-            ImageTransfer.sha256(bytes) != header.sha256) {
-            RuntimeStatusStore.transfer("Image rejected", "Image validation failed")
-            Log.w(TAG, "received invalid or unexpected binary clipboard payload")
+        val pending = pendingBinary
+        pendingBinary = null
+        if (!authenticated || pending == null) {
+            Log.w(TAG, "received binary data with no header expecting it")
             return
         }
-        when (val result = ClipboardWriter.writeImage(this, header, bytes)) {
-            is ClipboardWriteResult.Written ->
-                RuntimeStatusStore.transfer("Image received from Mac")
-            ClipboardWriteResult.Unchanged -> Unit
-            is ClipboardWriteResult.Failed ->
-                RuntimeStatusStore.transfer("Image rejected", result.error.message)
+
+        when (pending) {
+            is PendingBinary.FileChunk -> files?.onChunk(pending.header, bytes)
+
+            is PendingBinary.Image -> {
+                val header = pending.header
+                if (bytes.size != header.bytes ||
+                    ImageTransfer.sha256(bytes) != header.sha256
+                ) {
+                    RuntimeStatusStore.transfer("Image rejected", "Image validation failed")
+                    Log.w(TAG, "received invalid or unexpected binary clipboard payload")
+                    return
+                }
+                when (val result = ClipboardWriter.writeImage(this, header, bytes)) {
+                    is ClipboardWriteResult.Written ->
+                        RuntimeStatusStore.transfer("Image received from Mac")
+                    ClipboardWriteResult.Unchanged -> Unit
+                    is ClipboardWriteResult.Failed ->
+                        RuntimeStatusStore.transfer("Image rejected", result.error.message)
+                }
+            }
         }
+    }
+
+    // MARK: - Files
+
+    /** Called from the UI when the user shares documents into this app. */
+    fun onFilesShared(uris: List<android.net.Uri>) {
+        files?.enqueue(uris)
+    }
+
+    fun onCancelTransfer(id: String) {
+        files?.cancel(id)
+    }
+
+    fun onClearFinishedTransfers() {
+        files?.clearFinished()
     }
 
     // MARK: - Notifications out
@@ -1066,9 +1159,13 @@ class TennaNotificationListener : NotificationListenerService() {
         authenticated = value
         if (!value) {
             peerSupportsImages = false
-            pendingImage = null
+            peerSupportsFiles = false
+            pendingBinary = null
             imageJob.incrementAndGet()
             RuntimeStatusStore.updatePeerCapabilities(false)
+            // Paused, not failed: the partials stay on disk and the next connection
+            // continues them.
+            files?.sessionLost()
         }
     }
 

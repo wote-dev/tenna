@@ -11,6 +11,13 @@
          the Mac needs no contacts protocol of its own.
          Play Store's SMS/Call-Log policy is not a constraint here: this app is sideloaded
          and never published (see build.gradle.kts). -->
+    <!-- Received files. Optional: the socket lives in a bound service with no UI, so a
+         file pushed from the Mac while the phone is in a pocket would otherwise land in
+         Downloads with nothing to show for it. Denied, the dashboard's own transfer list
+         is still there, and nothing else changes. Writing into the public Downloads
+         collection needs no storage permission at all on API 33+. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
     <uses-permission android:name="android.permission.READ_SMS" />
     <uses-permission android:name="android.permission.SEND_SMS" />
     <uses-permission android:name="android.permission.READ_CONTACTS" />
@@ -59,6 +66,15 @@
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="image/*" />
+            </intent-filter>
+            <!-- Anything else shared into this app is a file for the Mac. Text keeps going
+                 to the clipboard, and an image is ambiguous enough to be worth asking
+                 about — see MainActivity.consumeSharedContent. -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
 

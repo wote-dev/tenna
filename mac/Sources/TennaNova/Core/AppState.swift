@@ -82,6 +82,10 @@ final class AppState {
     /// than sitting permanently empty with no explanation.
     var supportsCalls: Bool { capabilities.contains(Proto.callCapability) }
 
+    /// Whether this phone build can send and receive files. False means an older phone,
+    /// and the Files pane says so rather than accepting a drop nothing will carry.
+    var supportsFileTransfer: Bool { capabilities.contains(Proto.fileTransferCapability) }
+
     /// Everything the phone has mirrored, grouped into conversations.
     let history = NotificationStore()
 
@@ -90,6 +94,9 @@ final class AppState {
 
     /// App icons and contact photos, in a form the window can draw and observe.
     let icons: IconCatalog
+
+    /// Files going each way, in a form the window can draw and observe.
+    let transfers = TransferCenter()
 
     @ObservationIgnored private var server: Server?
     @ObservationIgnored private var notifications: NotificationPresenter?
@@ -105,15 +112,21 @@ final class AppState {
     /// Shared with `NotificationPresenter` so the cards and the window read one store.
     @ObservationIgnored private let iconCache: IconCache
     @ObservationIgnored private var iconRequests = IconRequestPolicy()
+    @ObservationIgnored private let files: TransferEngine
 
     init(iconCache: IconCache = IconCache()) {
         self.iconCache = iconCache
         self.icons = IconCatalog(cache: iconCache)
+        self.files = TransferEngine(center: transfers)
+        self.files.transport = self
     }
 
     private enum PendingBinary {
         case icon(sessionID: UUID, hash: String, bytes: Int)
         case image(sessionID: UUID, header: ClipImage)
+        /// One file chunk. Same single-slot rule as the two above, and it holds because
+        /// every sender queues a header and its body as one indivisible pair.
+        case fileChunk(sessionID: UUID, header: FileChunk)
     }
 
     func start() {
@@ -165,6 +178,9 @@ final class AppState {
                 self.pendingBinary = nil
                 self.iconRequests.reset()
                 self.clipboard?.setPeerSupportsImages(false)
+            // Not `dropLiveCalls`'s treatment: a transfer interrupted by a dropped socket
+            // is paused, keeps its partial file, and resumes on the next connection.
+            self.files.sessionLost()
                 // A call this Mac can no longer act on must not keep a live card on
                 // screen: every button on it would now go nowhere.
                 self.calls.dropLiveCalls()
@@ -399,6 +415,52 @@ final class AppState {
             }
             pendingBinary = .image(sessionID: session.id, header: m)
 
+        case "file.offer":
+            guard peerCapabilities.contains(Proto.fileTransferCapability),
+                  let m = try? Wire.decode(FileOffer.self, from: data), m.hasValidMetadata
+            else {
+                Log.warn("rejected invalid file.offer header")
+                session.close()
+                return
+            }
+            files.handle(offer: m)
+
+        case "file.begin":
+            if let m = try? Wire.decode(FileBegin.self, from: data) { files.handle(begin: m) }
+
+        case "file.chunk":
+            guard peerCapabilities.contains(Proto.fileTransferCapability),
+                  let m = try? Wire.decode(FileChunk.self, from: data), m.hasValidMetadata,
+                  pendingBinary == nil else {
+                // A second binary-expecting header while one is outstanding would make the
+                // next frame ambiguous, and writing one transfer's bytes into another's
+                // file is worse than dropping the session.
+                Log.warn("rejected invalid file.chunk header")
+                session.close()
+                return
+            }
+            pendingBinary = .fileChunk(sessionID: session.id, header: m)
+
+        case "file.ack":
+            if let m = try? Wire.decode(FileAck.self, from: data), m.hasValidMetadata {
+                files.handle(ack: m)
+            }
+
+        case "file.done":
+            if let m = try? Wire.decode(FileDone.self, from: data), m.hasValidMetadata {
+                files.handle(done: m)
+            }
+
+        case "file.result":
+            if let m = try? Wire.decode(FileResult.self, from: data), m.hasValidMetadata {
+                files.handle(result: m)
+            }
+
+        case "file.cancel":
+            if let m = try? Wire.decode(FileCancel.self, from: data), m.hasValidMetadata {
+                files.handle(cancel: m)
+            }
+
         default:
             Log.warn("unhandled message type: \(env.type)")
         }
@@ -470,6 +532,10 @@ final class AppState {
             if didPair { self.rebuildPairingPayload() }
         }
 
+        // Anything paused by the last disconnect is re-offered under the same id, so a
+        // transfer interrupted by a walk out of Wi-Fi range picks up where it stopped.
+        files.sessionReady(peerSupportsFiles: caps.contains(Proto.fileTransferCapability))
+
         // Push our current clipboard so the phone starts in sync.
         clipboard?.sendCurrentIfAny()
     }
@@ -503,6 +569,13 @@ final class AppState {
             }
             clipboard?.applyRemoteImage(data: data, mime: header.mime,
                                         sha256: header.sha256, name: header.name)
+
+        case .fileChunk(let sessionID, let header):
+            guard sessionID == session.id else {
+                Log.warn("file chunk from a stale session")
+                return
+            }
+            files.handleChunk(header: header, body: data)
         }
     }
 
@@ -758,4 +831,35 @@ final class AppState {
         }
     }
 
+    // MARK: - Files
+
+    /// Queues files the user dropped on the window or picked from the panel.
+    func sendFiles(_ urls: [URL]) {
+        files.enqueue(urls)
+    }
+
+    func cancelTransfer(_ id: String) {
+        files.cancel(id)
+    }
+
+    func clearFinishedTransfers() {
+        files.clearFinished()
+    }
+}
+
+extension AppState: TransferTransport {
+
+    @discardableResult
+    nonisolated func sendTransfer<T: Encodable>(_ message: T) -> Bool {
+        send(message)
+    }
+
+    @discardableResult
+    nonisolated func sendTransferChunk(header: FileChunk, body: Data,
+                                       then: @escaping () -> Void) -> Bool {
+        guard let session = server?.session,
+              authenticatedSessionID == session.id else { return false }
+        session.sendBinary(header: header, data: body, then: then)
+        return true
+    }
 }

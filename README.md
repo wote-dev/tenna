@@ -23,6 +23,7 @@ macOS (SwiftUI, menu bar + window)  ◀── TLS/WSS ──▶  Android (Compos
   Bonjour _tennanova._tcp                              SMS provider + SmsManager
   UNUserNotificationCenter                             CallStyle notification intents
   NSPasteboard                                         ClipboardManager
+  ~/Downloads                                          MediaStore Downloads
   bundled adb reverse                                  hosts nothing; always the client
 ```
 
@@ -40,6 +41,9 @@ macOS (SwiftUI, menu bar + window)  ◀── TLS/WSS ──▶  Android (Compos
   calls like WhatsApp and Signal go through one code path.
 - **Clipboard sync both ways:** text and one image at a time, including image files copied in
   Finder.
+- **Send files both ways.** Drop them on the Mac window or its Dock icon; share anything to
+  Tennanova on the phone. Chunked, checksummed, and resumed rather than restarted when the
+  connection drops.
 - A Mac window that keeps **Messages** and **Notifications** in separate lists, plus a Calls
   pane.
 
@@ -52,7 +56,6 @@ Each of these is a decision, not a backlog item:
 | **Call audio** | Android does not let any third-party app capture voice-call audio. `CAPTURE_AUDIO_OUTPUT` is privileged, and the accessibility workaround was closed in 2022. The Mac is a control surface; the sound stays on the phone. Every screen with a call button says so. |
 | **Mute during a call** | Needs an `InCallService`, which needs the default-dialer role. A button that silently does nothing is worse than no button. |
 | **Screen mirroring, webcam** | Different problem, different app. |
-| **Generic or multi-file transfer** | The clipboard carries one image at a time on purpose. A file manager is a different product. |
 | **MMS** | The SMS provider gives text threads without the app being the default SMS app. MMS does not. Out of scope rather than half-supported. |
 
 ---
@@ -311,6 +314,47 @@ The full mechanism, including why the focus window has to be configured the way 
 > This is built for a personally sideloaded app. Distributing it through Google Play would
 > require a separate Accessibility policy review and prominent in-app disclosure.
 
+### Files
+
+The clipboard carries one image at a time and still does. Files are a separate channel,
+because the two want opposite things: a clip is small, immediate and replaces the last one,
+while a file is large, slow and must survive a connection that does not.
+
+A file is split into 256 KiB chunks, each a JSON header immediately followed by one binary
+frame. The size is not arbitrary — the relay re-chunks everything at 32 KiB, and OkHttp
+closes a socket whose outbound queue passes 16 MiB — and it is what makes a progress bar
+mean something: a 14 MB video moves it fifty-five times rather than once.
+
+The sender may run at most 4 MiB ahead of the receiver. `file.ack` is what returns that
+credit, and it doubles as the resume point and as the sender's own progress figure, so the
+percentage on either screen is what actually landed rather than what was queued.
+
+The whole file's SHA-256 travels in the offer, before the first byte moves. That costs the
+sender one read pass — visible as *Preparing* on something large — and buys a resume that
+can be **verified**: a partial is only continued when the id, the length and the digest all
+still agree. The receiver hashes what it wrote and says so, which is why a row can end in
+*checksum mismatch* instead of a corrupt file in your Downloads folder.
+
+**A dropped connection pauses a transfer; it does not fail it.** Both ends keep the partial,
+and the next `hello.ack` re-offers the same id. Walking out of Wi-Fi range mid-file costs
+you the seconds you were away, not the file.
+
+Names arrive off the wire and are not trusted. Each side stages under the transfer's own id,
+never the peer's filename, and sanitises the name only at the point of saving — no
+separators, no `..`, no leading dot, and the resolved path confirmed to still be inside the
+destination. The Mac numbers a colliding name the way a browser does; Android hands the job
+to `MediaStore`, which writes into the public Downloads collection and needs no storage
+permission at all on API 33+.
+
+Files are capped at 2 GB, and a receiver short of disk space says so before anything moves
+rather than failing at 99%.
+
+Three ways in on the Mac — the window is a drop target whichever pane is open, the Files pane
+has a **Send Files…** button, and the Dock icon takes a drop too (so `open -a Tennanova <file>`
+works from a shell). On the phone there is one: **Share → Tennanova**. Sharing *text* still goes
+to the clipboard as it always has; sharing an image asks which you meant, because a screenshot
+sent to paste and a photo sent to keep are the same gesture.
+
 ### The relay
 
 Public, hotel and corporate Wi-Fi very often run **AP client isolation**: every packet from one
@@ -369,6 +413,7 @@ the relay, which carries ciphertext.
 | `READ_SMS` / `SEND_SMS` | SMS threads and sending | Optional; asked for only when you turn SMS on |
 | `READ_CONTACTS` | Resolving numbers to names on the phone | Optional, with SMS |
 | `ANSWER_PHONE_CALLS`, `READ_PHONE_STATE` | Answering a dialer whose notification carries no buttons | Optional; calls still ring without it |
+| `POST_NOTIFICATIONS` | Telling you a file arrived from the Mac | Optional; the dashboard lists transfers either way |
 | `INTERNET`, `ACCESS_NETWORK_STATE` | The socket itself | Required |
 
 There is deliberately no `CAPTURE_AUDIO_OUTPUT` (privileged), no default-SMS-app role, and no
@@ -382,6 +427,7 @@ default-dialer role.
 | Paired device, tokens, relay secret | `UserDefaults` for `com.tennanova.mac` |
 | Conversation history | `~/Library/Application Support/com.tennanova.mac/history.json` |
 | App icons | `~/Library/Caches/com.tennanova.mac/icons/` |
+| Received files | `~/Downloads`, staged in `~/Library/Caches/com.tennanova.mac/transfers/` while in flight |
 
 Unpairing from either device forgets the phone and deletes the conversations that came with it.
 

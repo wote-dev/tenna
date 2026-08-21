@@ -74,17 +74,24 @@ final class PeerSession {
     }
 
     /// Queues a metadata frame and its binary body as one indivisible pair. Other
-    /// producers (notification icons and clipboard images) cannot interleave them.
-    func sendBinary<T: Encodable>(header: T, data: Data) {
+    /// producers (notification icons, clipboard images and file chunks) cannot interleave
+    /// them, which is what lets a receiver attribute a binary frame to the header before
+    /// it without any id inside the frame itself.
+    ///
+    /// `then` fires once the body has been handed to the transport. A file transfer sends
+    /// its next chunk from there: it is the only backpressure signal `NWConnection`
+    /// offers, and without it a whole file is queued into memory at once.
+    func sendBinary<T: Encodable>(header: T, data: Data, then: (() -> Void)? = nil) {
         do {
             let encoded = try Wire.encode(header)
             queue.async { [weak self] in
                 guard let self else { return }
                 self.sendFrame(encoded, opcode: .text)
-                self.sendFrame(data, opcode: .binary)
+                self.sendFrame(data, opcode: .binary, then: then)
             }
         } catch {
             Log.error("binary header encode failed: \(error.localizedDescription)")
+            then?()
         }
     }
 

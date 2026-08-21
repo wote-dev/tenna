@@ -100,6 +100,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    /// Files dropped on the Dock icon, or opened with `open -a Tennanova <file>`.
+    ///
+    /// The window's drop target covers the case where the window is on screen; this covers
+    /// the case where it is not, which on macOS is the same gesture aimed at the same app.
+    func application(_ application: NSApplication, open urls: [URL]) {
+        let files = urls.filter { $0.isFileURL }
+        guard !files.isEmpty else { return }
+        state.sendFiles(files)
+        MainActor.assumeIsolated { MainWindowOpener.show() }
+    }
+
     /// Closing the window leaves the phone connected. Mirrored notifications and
     /// clipboard sync are most of the value and neither needs a window on screen.
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {

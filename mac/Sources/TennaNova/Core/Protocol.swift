@@ -32,12 +32,51 @@ enum Proto {
     /// audio — so this Mac rings and controls, and the sound stays on the phone. Every
     /// surface that offers a call button here says so.
     static let callCapability = "call.v1"
+    /// Generic file transfer, both directions, chunked and resumable. The clipboard
+    /// carries one image at a time and stays that way; this is everything else.
+    static let fileTransferCapability = "file.v1"
+
     static let maxImageBytes = 25 * 1024 * 1024
+
+    /// The largest file either end will accept. Beyond this the staging copy the phone
+    /// makes in its cache stops being a reasonable thing to ask of a phone.
+    static let maxFileBytes = 2 * 1024 * 1024 * 1024
+
+    /// One `file.chunk` body. Not arbitrary: the relay re-chunks at 32 KiB with 2 MiB of
+    /// backpressure, OkHttp closes a socket whose outbound queue passes 16 MiB, and a
+    /// whole-file frame would move the progress bar exactly once.
+    static let fileChunkBytes = 256 * 1024
+
+    /// How many chunks a sender may have unacked. `file.ack` is what returns the credit.
+    static let fileWindowChunks = 16
+
+    /// How often a receiver acks. Small enough to keep the window full, large enough that
+    /// acks are not a meaningful share of the traffic.
+    static let fileAckEveryChunks = 4
 
     static func isLowercaseSHA256(_ value: String) -> Bool {
         value.utf8.count == 64 && value.utf8.allSatisfy {
             (48...57).contains($0) || (97...102).contains($0)
         }
+    }
+
+    /// A transfer id. Hex only, so it can name a staging file without escaping the
+    /// directory it belongs in — the same reason `IconCache` keeps hashes to hex.
+    static func isTransferID(_ value: String) -> Bool {
+        let count = value.utf8.count
+        return count >= 8 && count <= 64 && value.utf8.allSatisfy {
+            (48...57).contains($0) || (97...102).contains($0)
+        }
+    }
+
+    /// A filename off the wire, checked before it is stored anywhere. This is the refusal
+    /// bar, not the sanitiser: a name that passes here is still rewritten by
+    /// `TransferLog.safeFilename` before anything is written under it.
+    static func isValidTransferName(_ value: String) -> Bool {
+        let bytes = value.utf8
+        guard (1...255).contains(bytes.count) else { return false }
+        guard value != "." && value != ".." else { return false }
+        return !bytes.contains { $0 == 0x2F || $0 == 0x5C || $0 == 0x00 }
     }
 }
 
@@ -89,7 +128,8 @@ struct HelloAck: Codable {
     /// they need it is the moment they cannot reach the Mac to be told.
     var relayHost: String?
     var relayRoom: String?
-    var capabilities: [String] = [Proto.imageClipboardCapability]
+    var capabilities: [String] = [Proto.imageClipboardCapability,
+                                  Proto.fileTransferCapability]
 }
 
 /// Sent mid-session when the Mac gains or loses an address — joining a phone hotspot
@@ -484,6 +524,98 @@ struct ClipImage: Codable {
             mime.count <= 100 && mime.hasPrefix("image/") &&
             Proto.isLowercaseSHA256(sha256) && (name?.count ?? 0) <= 120
     }
+}
+
+// MARK: - Files
+
+/// Announces one file. Answered with `file.begin`, or with `file.cancel` if the receiver
+/// will not take it.
+///
+/// `sha256` covers the whole file and is here rather than in `file.done` deliberately: it
+/// costs the sender one read pass before the first byte moves, and it is what lets a
+/// resumed transfer be verified rather than assumed.
+struct FileOffer: Codable {
+    var v = Proto.version
+    var type = "file.offer"
+    var id: String
+    var name: String
+    var bytes: Int
+    var mime: String
+    var sha256: String
+    /// Source modification time, epoch millis. Advisory; the receiver may ignore it.
+    var modified: Int64?
+
+    var hasValidMetadata: Bool {
+        Proto.isTransferID(id) && bytes > 0 && bytes <= Proto.maxFileBytes &&
+            mime.count <= 100 && Proto.isValidTransferName(name) &&
+            Proto.isLowercaseSHA256(sha256)
+    }
+}
+
+/// The receiver's go-ahead, and the offset it wants the sender to start from. Non-zero
+/// means it already holds that much of this exact file and is resuming.
+struct FileBegin: Codable {
+    var v = Proto.version
+    var type = "file.begin"
+    var id: String
+    var offset: Int
+
+    func hasValidMetadata(fileBytes: Int) -> Bool {
+        Proto.isTransferID(id) && offset >= 0 && offset < fileBytes
+    }
+}
+
+/// Metadata for one chunk. The next WebSocket binary frame contains exactly `bytes` bytes.
+struct FileChunk: Codable {
+    var v = Proto.version
+    var type = "file.chunk"
+    var id: String
+    var offset: Int
+    var bytes: Int
+
+    var hasValidMetadata: Bool {
+        Proto.isTransferID(id) && offset >= 0 && bytes > 0 && bytes <= Proto.fileChunkBytes
+    }
+}
+
+/// Flow-control credit, resume point, and the sender's own progress figure in one message.
+struct FileAck: Codable {
+    var v = Proto.version
+    var type = "file.ack"
+    var id: String
+    var received: Int
+
+    var hasValidMetadata: Bool { Proto.isTransferID(id) && received >= 0 }
+}
+
+/// No more chunks are coming. The receiver now hashes what it wrote.
+struct FileDone: Codable {
+    var v = Proto.version
+    var type = "file.done"
+    var id: String
+
+    var hasValidMetadata: Bool { Proto.isTransferID(id) }
+}
+
+/// What became of it, once the receiver has hashed the bytes that landed.
+struct FileResult: Codable {
+    var v = Proto.version
+    var type = "file.result"
+    var id: String
+    var ok: Bool
+    var error: String?
+
+    var hasValidMetadata: Bool { Proto.isTransferID(id) && (error?.count ?? 0) <= 200 }
+}
+
+/// Abandons a transfer, from either end, at any point.
+struct FileCancel: Codable {
+    var v = Proto.version
+    var type = "file.cancel"
+    var id: String
+    var reason: String
+
+    var hasValidMetadata: Bool { Proto.isTransferID(id) && reason.count <= 40 }
 }
 
 // MARK: - Coding helpers

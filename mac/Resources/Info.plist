@@ -21,6 +21,25 @@
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 
+	<!-- So a file dropped on the Dock icon, or `open -a Tennanova <file>`, reaches
+	     `application(_:open:)` and is sent to the phone. Viewer/None: this app neither
+	     edits a document nor claims to own any type, it only forwards one. -->
+	<key>CFBundleDocumentTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeName</key>
+			<string>Any file</string>
+			<key>CFBundleTypeRole</key>
+			<string>Viewer</string>
+			<key>LSHandlerRank</key>
+			<string>None</string>
+			<key>LSItemContentTypes</key>
+			<array>
+				<string>public.item</string>
+			</array>
+		</dict>
+	</array>
+
 	<!-- Deliberately no LSUIElement. The app is a regular Dock application with a main
 	     window; the menu bar item stays as a second, always-there entry point. -->
 

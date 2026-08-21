@@ -62,8 +62,14 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 "$LSREGISTER" -u "$PWD/$APP" 2>/dev/null || true
 "$LSREGISTER" -f "$PWD/$APP" 2>/dev/null || true
 
-# usernoted holds its own icon cache and will happily keep showing the old blank one.
+# Three separate caches hold the answer, and re-registering clears none of them.
+# `usernoted` is Notification Center itself; `iconservicesagent` and `iconservicesd` are
+# what it asks for a bundle's icon, and they key on the bundle id, so an icon that changed
+# without the id changing keeps resolving to the old picture until they are restarted.
+# All three are launchd agents and come straight back.
 killall usernoted 2>/dev/null || true
+killall iconservicesagent 2>/dev/null || true
+killall iconservicesd 2>/dev/null || true
 
 echo
 echo "built $PWD/$APP"

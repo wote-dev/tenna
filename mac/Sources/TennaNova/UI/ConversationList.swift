@@ -49,6 +49,15 @@ struct ConversationList: View {
                 }
             }
 
+            // Same rule as Calls: only once there is something to say. An empty Files row
+            // on a phone that has never moved one is a permanent reminder of a feature
+            // doing nothing.
+            if state.supportsFileTransfer || state.transfers.hasAnything {
+                Section {
+                    filesRow.tag(SidebarItem.files)
+                }
+            }
+
             Section {
                 tabs
 
@@ -135,6 +144,34 @@ struct ConversationList: View {
 
     /// The way in to the Calls pane, and the only place a ringing phone shows in the
     /// sidebar — the banner, the menu bar and the Notification Center card do the shouting.
+    private var filesRow: some View {
+        let moving = state.transfers.running.count
+        return HStack(spacing: 8) {
+            Image(systemName: moving > 0 ? "arrow.up.arrow.down.circle.fill" : "folder")
+                .foregroundStyle(moving > 0 ? Tenna.accent : .secondary)
+                .symbolEffect(.pulse, isActive: moving > 0)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Files")
+                Text(filesSubtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+            if state.transfers.unseen > 0 {
+                UnreadBadge(count: state.transfers.unseen)
+            }
+        }
+    }
+
+    private var filesSubtitle: String {
+        let moving = state.transfers.running.count
+        if moving == 1 { return "1 transfer running" }
+        if moving > 1 { return "\(moving) transfers running" }
+        if !state.supportsFileTransfer { return "Not supported by this phone" }
+        return "Drop files here to send them"
+    }
+
     private var callsRow: some View {
         HStack(spacing: 8) {
             Image(systemName: state.calls.isRinging ? "phone.badge.waveform.fill" : "phone")

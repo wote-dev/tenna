@@ -2,6 +2,7 @@ package com.tennanova.core
 
 import com.tennanova.clipboard.ClipboardAccessStatus
 import com.tennanova.clipboard.ClipboardPayload
+import com.tennanova.files.TransferItem
 import com.tennanova.net.ConnectionTransport
 import com.tennanova.notifications.TennaNotificationListener
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -71,6 +72,13 @@ data class RuntimeSnapshot(
     val smsThreadCount: Int = 0,
     val calls: CallAccessStatus = CallAccessStatus.OFF,
     val peerSupportsImages: Boolean = false,
+    val peerSupportsFiles: Boolean = false,
+    /**
+     * Files going each way. Carried inside the snapshot rather than as a flow of its own:
+     * `MainViewModel.combine` is already at its five-argument overload, and a sixth forces
+     * the vararg form for the sake of one list.
+     */
+    val transfers: List<TransferItem> = emptyList(),
     val lastTransfer: String? = null,
     val connectionError: String? = null,
     val clipboardError: String? = null,
@@ -126,8 +134,14 @@ object RuntimeStatusStore {
         mutable.update { it.copy(clipboard = status, clipboardError = error) }
     }
 
-    fun updatePeerCapabilities(supportsImages: Boolean) {
-        mutable.update { it.copy(peerSupportsImages = supportsImages) }
+    fun updatePeerCapabilities(supportsImages: Boolean, supportsFiles: Boolean = false) {
+        mutable.update {
+            it.copy(peerSupportsImages = supportsImages, peerSupportsFiles = supportsFiles)
+        }
+    }
+
+    fun updateTransfers(transfers: List<TransferItem>) {
+        mutable.update { it.copy(transfers = transfers) }
     }
 
     fun transfer(message: String, error: String? = null) {
@@ -139,4 +153,14 @@ object RuntimeStatusStore {
         true
     } ?: false
     fun pairingChanged() = serviceRef.get()?.onPairingChanged()
+
+    /** The UI's way to hand shared documents to the service that owns the socket. */
+    fun sendFiles(uris: List<android.net.Uri>): Boolean = serviceRef.get()?.let {
+        it.onFilesShared(uris)
+        true
+    } ?: false
+
+    fun cancelTransfer(id: String) = serviceRef.get()?.onCancelTransfer(id)
+
+    fun clearFinishedTransfers() = serviceRef.get()?.onClearFinishedTransfers()
 }

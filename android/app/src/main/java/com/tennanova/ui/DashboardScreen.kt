@@ -25,12 +25,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Download
+import androidx.compose.material.icons.outlined.FolderOpen
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.LinkOff
 import androidx.compose.material.icons.outlined.Message
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.QrCodeScanner
+import androidx.compose.material.icons.outlined.UploadFile
 import androidx.compose.material3.Switch
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -38,6 +41,7 @@ import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.ListItemDefaults
@@ -71,6 +75,9 @@ import com.tennanova.clipboard.ClipboardAccessStatus
 import com.tennanova.core.CallAccessStatus
 import com.tennanova.core.SmsAccessStatus
 import com.tennanova.core.ConnectionStatus
+import com.tennanova.files.TransferDirection
+import com.tennanova.files.TransferItem
+import com.tennanova.files.TransferState
 import com.tennanova.net.ConnectionTransport
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -84,7 +91,9 @@ internal fun DashboardScreen(
     onUnpair: () -> Unit,
     onSetSmsEnabled: (Boolean) -> Unit,
     onSetCallsEnabled: (Boolean) -> Unit,
-    onGrantCallControl: () -> Unit
+    onGrantCallControl: () -> Unit,
+    onCancelTransfer: (String) -> Unit = {},
+    onClearTransfers: () -> Unit = {}
 ) {
     // Saveable, not merely remembered: a rotation or a fold recreates the Activity, and
     // losing a half-typed pairing code to one is exactly the kind of glitch this screen
@@ -179,6 +188,25 @@ internal fun DashboardScreen(
                         },
                         onAction = onGrantCallControl
                     )
+                }
+
+                // Only once there is something to say. An empty Files section on a phone
+                // that has never moved one is a permanent reminder of a feature doing
+                // nothing — the same rule the Calls row on the Mac follows.
+                if (state.transfers.isNotEmpty() || state.peerSupportsFiles) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            SectionTitle("Files")
+                            Spacer(Modifier.weight(1f))
+                            if (state.transfers.any { it.state.isFinished }) {
+                                TextButton(onClick = onClearTransfers) { Text("Clear") }
+                            }
+                        }
+                        FilesCard(state, onCancelTransfer)
+                    }
                 }
 
                 AnimatedVisibility(
@@ -276,6 +304,9 @@ private fun ConnectionHero(state: MainUiState) {
                 )
                 CapabilityChip(
                     Icons.Outlined.Call, "Calls", state.calls != CallAccessStatus.OFF
+                )
+                CapabilityChip(
+                    Icons.Outlined.FolderOpen, "Files", state.peerSupportsFiles
                 )
             }
         }
@@ -719,5 +750,139 @@ private fun UnpairDialog(onDismiss: () -> Unit, onConfirm: () -> Unit) {
             TextButton(onClick = onDismiss) { Text("Cancel") }
         },
         containerColor = Color(0xFFF4F8FD)
+    )
+}
+
+
+/**
+ * The transfer list: one row per file, each saying which way it is going, how far it has
+ * got, and what became of it.
+ */
+@Composable
+private fun FilesCard(state: MainUiState, onCancel: (String) -> Unit) {
+    GlassSurface(
+        tone = GlassTone.Flat,
+        shape = MaterialTheme.shapes.medium,
+        cornerRadius = 16.dp,
+        contentPadding = PaddingValues(vertical = 4.dp)
+    ) {
+        if (state.transfers.isEmpty()) {
+            val (title, detail) = filesCopy(state)
+            ListItem(
+                colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+                leadingContent = {
+                    Icon(Icons.Outlined.FolderOpen, contentDescription = null)
+                },
+                headlineContent = { Text(title) },
+                supportingContent = { Text(detail) }
+            )
+        } else {
+            state.transfers.forEachIndexed { index, item ->
+                TransferRow(item, onCancel)
+                if (index != state.transfers.lastIndex) {
+                    HorizontalDivider(Modifier.padding(horizontal = 16.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferRow(item: TransferItem, onCancel: (String) -> Unit) {
+    val outgoing = item.direction == TransferDirection.TO_MAC
+    ListItem(
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
+        leadingContent = {
+            Icon(
+                if (outgoing) Icons.Outlined.UploadFile else Icons.Outlined.Download,
+                contentDescription = if (outgoing) "Sending" else "Receiving",
+                tint = when (item.state) {
+                    TransferState.FAILED, TransferState.CANCELLED ->
+                        MaterialTheme.colorScheme.error
+                    TransferState.COMPLETED -> MaterialTheme.colorScheme.primary
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                }
+            )
+        },
+        headlineContent = { Text(item.name, maxLines = 1, overflow = TextOverflow.Ellipsis) },
+        supportingContent = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(transferStatusLine(item))
+                if (!item.state.isFinished) {
+                    LinearProgressIndicator(
+                        progress = { item.fraction },
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        },
+        trailingContent = {
+            if (!item.state.isFinished) {
+                TextButton(onClick = { onCancel(item.id) }) { Text("Stop") }
+            }
+        }
+    )
+}
+
+/**
+ * One line per row. Pure and `internal` so it can be asserted on without Compose, the same
+ * arrangement `smsCopy` and `callsCopy` use.
+ */
+internal fun transferStatusLine(item: TransferItem): String = when (item.state) {
+    TransferState.QUEUED -> "Waiting its turn"
+    TransferState.PREPARING -> "Preparing…"
+    TransferState.OFFERED -> "Waiting for the Mac"
+    TransferState.ACTIVE ->
+        "${formatBytes(item.transferred)} of ${formatBytes(item.bytes)} · " +
+            "${(item.fraction * 100).toInt()}%"
+    TransferState.PAUSED -> item.detail ?: "Paused — it will continue when you reconnect"
+    TransferState.VERIFYING -> "Checking it arrived intact…"
+    TransferState.COMPLETED ->
+        if (item.direction == TransferDirection.TO_MAC) "Sent · ${formatBytes(item.bytes)}"
+        else item.detail ?: "Saved to Downloads"
+    TransferState.CANCELLED -> "Cancelled"
+    TransferState.FAILED -> item.detail ?: "Failed"
+}
+
+internal fun filesCopy(state: MainUiState): Pair<String, String> = when {
+    !state.peerSupportsFiles ->
+        "Files" to "Update the Mac app to send and receive files."
+    else ->
+        "Files" to "Share anything to Tennanova to send it to your Mac. " +
+            "Files from the Mac land in Downloads."
+}
+
+/** Sizes as a person would say them, and never more precision than the number deserves. */
+internal fun formatBytes(bytes: Long): String = when {
+    bytes >= 1_000_000_000 -> "%.1f GB".format(bytes / 1_000_000_000.0)
+    bytes >= 1_000_000 -> "%.1f MB".format(bytes / 1_000_000.0)
+    bytes >= 1_000 -> "%.1f KB".format(bytes / 1_000.0)
+    else -> "$bytes B"
+}
+
+/**
+ * What the user meant by sharing an image.
+ *
+ * A screenshot shared to paste on the Mac and a photo shared to keep there are the same
+ * gesture, and this app has done the first since before it could do the second. Guessing
+ * either way silently removes one of them.
+ */
+@Composable
+internal fun SharedImageChoice(
+    onClipboard: () -> Unit,
+    onFile: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Send this image how?") },
+        text = {
+            Text(
+                "Copying puts it on the Mac's clipboard, ready to paste. " +
+                    "Sending saves it to the Mac's Downloads folder."
+            )
+        },
+        confirmButton = { TextButton(onClick = onFile) { Text("Send as a file") } },
+        dismissButton = { TextButton(onClick = onClipboard) { Text("Copy to clipboard") } }
     )
 }

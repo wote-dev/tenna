@@ -146,6 +146,11 @@ struct DeviceView: View {
                         : "Calls are switched off on the phone",
                       symbol: state.supportsCalls ? "phone" : "phone.down",
                       tint: state.supportsCalls ? Tenna.accent : .secondary)
+            StatusRow(state.supportsFileTransfer
+                        ? "Files — drop them on this window, or share to Tennanova there"
+                        : "File transfer needs a newer build on the phone",
+                      symbol: state.supportsFileTransfer ? "folder" : "folder.badge.questionmark",
+                      tint: state.supportsFileTransfer ? Tenna.accent : .secondary)
             if state.supportsCalls {
                 Caption("Call audio stays on the phone. Android lets no app carry it to "
                         + "a Mac, so this is a control surface — it rings, and it presses "

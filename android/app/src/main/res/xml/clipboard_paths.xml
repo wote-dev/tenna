@@ -1,4 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="clipboard" path="clipboard/" />
+    <!-- Its own subdirectory, because ClipboardWriter deletes everything in clipboard/ on
+         every write and a staged transfer must survive that. -->
+    <cache-path name="transfers" path="transfers/" />
 </paths>

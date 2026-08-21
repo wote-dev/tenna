@@ -13,6 +13,7 @@ import com.tennanova.core.CallAccessStatus
 import com.tennanova.core.ConnectionStatus
 import com.tennanova.core.PairingPayload
 import com.tennanova.core.RuntimeStatusStore
+import com.tennanova.files.TransferItem
 import com.tennanova.core.Settings
 import com.tennanova.core.SmsAccessStatus
 import com.tennanova.sms.SmsMirror
@@ -39,6 +40,8 @@ data class MainUiState(
     val smsThreadCount: Int = 0,
     val calls: CallAccessStatus = CallAccessStatus.OFF,
     val peerSupportsImages: Boolean = false,
+    val peerSupportsFiles: Boolean = false,
+    val transfers: List<TransferItem> = emptyList(),
     val lastTransfer: String? = null,
     val message: String? = null,
     val error: String? = null,
@@ -113,6 +116,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             smsThreadCount = runtime.smsThreadCount,
             calls = runtime.calls,
             peerSupportsImages = runtime.peerSupportsImages,
+            peerSupportsFiles = runtime.peerSupportsFiles,
+            transfers = runtime.transfers,
             lastTransfer = runtime.lastTransfer,
             message = localMessage
                 ?.takeUnless { it.transient && runtime.connection.isSettled }
@@ -246,6 +251,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         show(Banner("Mac unpaired"))
         RuntimeStatusStore.pairingChanged()
     }
+
+    /**
+     * Whether the POST_NOTIFICATIONS prompt has already been shown once. Deliberately not
+     * persisted: it exists to stop one session asking twice, not to remember an answer
+     * the system already remembers.
+     */
+    var hasAskedAboutFileNotifications = false
 
     fun setMessage(value: String?, transient: Boolean = false) {
         show(value?.let { Banner(it, transient) })
