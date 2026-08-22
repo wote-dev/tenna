@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 @testable import TennaNova
 
 // Deliberately not importing `Testing` here.
@@ -53,6 +54,59 @@ func makeNotification(
 func roundTripped(_ guardState: NotificationReplayGuard) -> NotificationReplayGuard? {
     guard let data = try? JSONEncoder().encode(guardState) else { return nil }
     return try? JSONDecoder().decode(NotificationReplayGuard.self, from: data)
+}
+
+func validMirrorPacketBytes() -> Data {
+    var bytes = Data("TNMV".utf8)
+    bytes.append(contentsOf: [1, 1, 0x12, 0x34, 0x10, 0x20, 0x30, 0x40,
+                              1, 2, 3, 4, 5, 6, 7, 8])
+    bytes.append(contentsOf: [0, 0, 0, 1, 0x65])
+    return bytes
+}
+
+func malformedMirrorPacket(flags: UInt8 = 0, corruptMagic: Bool = false) -> Data {
+    var packet = Data(repeating: 0, count: 21)
+    packet.replaceSubrange(0..<4, with: Data("TNMV".utf8))
+    packet[4] = 1
+    packet[5] = flags
+    if corruptMagic { packet[0] = 0 }
+    return packet
+}
+
+func mirrorAccessUnitBytes(_ packet: MirrorVideoPacket) -> [UInt8] {
+    Array(packet.accessUnit)
+}
+
+func annexBFixture() -> Data { Data([0, 0, 0, 1, 0x67, 1, 0, 0, 1, 0x68, 2]) }
+func annexBUnitBytes() -> [[UInt8]] { H264AnnexB.units(annexBFixture()).map(Array.init) }
+func annexBAVCCBytes() -> [UInt8]? { H264AnnexB.avcc(annexBFixture()).map(Array.init) }
+
+func portraitLetterboxFrame() -> [Double] {
+    let rect = MirrorViewport.videoRect(
+        container: CGSize(width: 1000, height: 500),
+        video: CGSize(width: 500, height: 1000)
+    )
+    return [rect.origin.x, rect.origin.y, rect.width, rect.height].map(Double.init)
+}
+
+func portraitLetterboxPoint(x: Double, y: Double) -> [Double]? {
+    let rect = MirrorViewport.videoRect(
+        container: CGSize(width: 1000, height: 500),
+        video: CGSize(width: 500, height: 1000)
+    )
+    return MirrorViewport.normalized(CGPoint(x: x, y: y), in: rect)
+        .map { [Double($0.x), Double($0.y)] }
+}
+
+func mirrorConfigRoundTrip() throws -> MirrorConfig {
+    let config = MirrorConfig(sessionId: "session", generation: 2, codec: "h264",
+                              width: 1080, height: 1920, rotation: 0,
+                              sps: Data([0x67, 1]), pps: Data([0x68, 2]))
+    return try Wire.decode(MirrorConfig.self, from: Wire.encode(config))
+}
+
+func mirrorConfigParameterBytes(_ config: MirrorConfig) -> [[UInt8]] {
+    [Array(config.sps), Array(config.pps)]
 }
 
 /// Hands a test its own presentation archive in a throwaway directory, and cleans up.

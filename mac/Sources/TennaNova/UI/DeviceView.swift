@@ -126,6 +126,19 @@ struct DeviceView: View {
                 CapabilityRow("Notification replies", symbol: "bell.badge", available: true)
                 CapabilityRow("Call controls", symbol: "phone", available: state.supportsCalls)
                 CapabilityRow("File transfer", symbol: "folder", available: state.supportsFileTransfer)
+                CapabilityRow("Screen mirroring", symbol: "rectangle.on.rectangle",
+                              available: state.supportsMirroring)
+            }
+
+            DashboardCard(title: "Screen mirroring", symbol: "rectangle.on.rectangle") {
+                Caption(mirrorDescription)
+                Button {
+                    state.beginMirroring()
+                } label: {
+                    Label("Mirror Phone", systemImage: "play.rectangle")
+                }
+                .adaptiveGlassButton(prominent: true)
+                .disabled(!state.supportsMirroring || !state.mirror.canMirror)
             }
 
             DashboardCard(title: "Pairing", symbol: "qrcode") {
@@ -135,6 +148,16 @@ struct DeviceView: View {
                     .adaptiveGlassButton()
             }
         }
+    }
+
+    private var mirrorDescription: String {
+        if !state.supportsMirroring {
+            return "Update Tennanova on your phone to add screen mirroring."
+        }
+        if !state.mirror.canMirror {
+            return "Screen video needs a direct local Wi-Fi or USB connection; it is unavailable over relay."
+        }
+        return "View and control your phone in a separate window. Android asks for capture approval every time."
     }
 
     private var waiting: some View {

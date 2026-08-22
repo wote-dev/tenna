@@ -6,10 +6,13 @@ Both implementations must be changed together when this file changes.
 ## Transport
 
 - **Mac is the server**, Android is the client. The phone roams; the Mac doesn't.
-- One **TLS 1.2+ WebSocket** connection carries everything.
+- One primary **TLS 1.2+ WebSocket** connection carries control traffic. A mirror session adds
+  one auxiliary pinned-TLS WebSocket for H.264 video; it never replaces the primary connection.
 - **Text frames** = UTF-8 JSON control messages (below).
 - **Binary frames** = app icon or clipboard-image bytes, always preceded by the matching
   `icon.data` or `clip.image` text header.
+- Mirror video binary frames exist only on the auxiliary socket and are self-describing with the
+  `TNMV` header below, so they cannot block notifications, calls, clipboard or files.
 - WebSocket ping/pong provides keepalive. The Android client pings every 20s and reconnects
   with bounded single-flight backoff when the connection fails.
 - When the QR advertises `usbPort`, Android first connects to `127.0.0.1:usbPort`. The Mac
@@ -105,13 +108,13 @@ rather than guessing.
 {"v":1,"type":"hello","token":"<pairing token, first time only>",
  "deviceToken":"<long-lived token, subsequent connections>",
  "device":{"id":"stable-uuid","name":"Pixel 9","model":"Pixel 9","androidSdk":35,"battery":82},
- "capabilities":["clip.image.v1"]}
+ "capabilities":["clip.image.v1","mirror.video.v1","mirror.control.v1"],"transport":"lan"}
 
 // Mac -> Android
 {"v":1,"type":"hello.ack","ok":true,"deviceToken":"<issued on first pair>",
  "macName":"Daniel's MacBook","hosts":["192.168.1.42","192.168.43.37"],"port":18777,
  "usbPort":18777,"relayHost":"tennanova-relay.fly.dev","relayRoom":"<base64url sha256 of the Mac's relay secret>",
- "capabilities":["clip.image.v1"]}
+ "capabilities":["clip.image.v1","mirror.video.v1","mirror.control.v1"]}
 
 // Mac -> Android, the address list changed mid-session (it joined a hotspot, say),
 // or the USB tunnel came up or went away.
@@ -123,8 +126,11 @@ rather than guessing.
 {"v":1,"type":"hello.nack","reason":"bad_token|version_mismatch"}
 
 // Android -> Mac, optional state refresh (battery is also present in hello)
-{"v":1,"type":"device.state","battery":74,"charging":true,"dnd":false}
+{"v":1,"type":"device.state","battery":74,"charging":true,"dnd":false,"transport":"usb"}
 ```
+
+`transport` is `lan`, `usb` or `relay`, and is additive within v1. Screen mirroring is offered
+only when both mirror capabilities are present and the current route is `lan` or `usb`.
 
 `usbPort` is authoritative in exactly the same way `hosts` is: present means the `adb reverse`
 tunnel is up, **absent means there is no USB tunnel right now** — not "unchanged". It has to
@@ -423,6 +429,101 @@ immediately followed by one binary frame of exactly `bytes` bytes:
 - Clipboard does not sync while the phone is locked (`isDeviceLocked` short-circuits reads in
   `ClipboardService`). This is expected, not a bug.
 
+## Screen mirroring — capabilities `mirror.video.v1` and `mirror.control.v1`
+
+Mirroring is capability-gated, local-only, and supports one paired phone and one session. Either
+peer may start: the Mac sends `mirror.request`; the Android dashboard publishes the same state
+transition itself. Android's public `MediaProjection` prompt is required for every session.
+
+### Primary control socket
+
+```jsonc
+// Mac -> Android
+{"v":1,"type":"mirror.request","requestId":"<uuid>"}
+
+// Android -> Mac. requestId is retained from the request; sessionId appears after approval.
+{"v":1,"type":"mirror.state","requestId":"<uuid>","state":"approval_required",
+ "controlAvailable":false}
+{"v":1,"type":"mirror.state","requestId":"<uuid>","sessionId":"<uuid>",
+ "state":"starting","controlAvailable":true}
+
+// Either peer stops. sessionId may be absent while approval is still pending.
+{"v":1,"type":"mirror.stop","sessionId":"<uuid>"}
+
+// Mac -> Android input. Coordinates are normalized to the captured display.
+{"v":1,"type":"mirror.input","sessionId":"<uuid>","inputId":"<uuid>",
+ "kind":"tap","x":0.4,"y":0.6}
+{"v":1,"type":"mirror.input","sessionId":"<uuid>","inputId":"<uuid>",
+ "kind":"swipe","durationMs":240,
+ "points":[{"x":0.5,"y":0.8,"t":0},{"x":0.5,"y":0.2,"t":1}]}
+{"v":1,"type":"mirror.input","sessionId":"<uuid>","inputId":"<uuid>",
+ "kind":"global","action":"back"}
+
+// Android -> Mac
+{"v":1,"type":"mirror.input.result","sessionId":"<uuid>","inputId":"<uuid>",
+ "ok":false,"error":"control_unavailable"}
+
+// Mac -> Android after a decoder flush or backlog recovery
+{"v":1,"type":"mirror.keyframe.request","sessionId":"<uuid>"}
+```
+
+States are exactly `idle`, `approval_required`, `starting`, `streaming`, `stopping`, `stopped`
+and `error`. A supplied state reason is one of `user`, `window_closed`, `permission_denied`,
+`phone_locked`, `projection_stopped`, `transport_lost`, `not_local`, `encoder_failed` or
+`control_unavailable`.
+
+Tap coordinates and every swipe point must be finite and inside `0...1`. A swipe contains 2–32
+points, monotonic normalized `t`, and a duration clamped to 80–1000 ms. Global action is `back`,
+`home` or `recents`. Android accepts input only for the current session ID, serializes gesture
+dispatch, and reports every result. Pointer events in the Mac window's letterbox are ignored.
+
+### Auxiliary video socket
+
+The auxiliary WebSocket uses the same pinned certificate and direct endpoint selection, with the
+relay provider disabled. It authenticates before any video data:
+
+```jsonc
+// Android -> Mac
+{"v":1,"type":"mirror.stream.hello","deviceId":"<paired id>",
+ "deviceToken":"<paired token>","sessionId":"<announced active session>"}
+// Mac -> Android
+{"v":1,"type":"mirror.stream.ack","ok":true}
+// Android -> Mac, before frames and whenever rotation creates a new generation
+{"v":1,"type":"mirror.config","sessionId":"<uuid>","generation":2,"codec":"h264",
+ "width":1080,"height":1920,"rotation":0,"sps":"<base64>","pps":"<base64>"}
+```
+
+The Mac retains one primary session and one auxiliary mirror stream. The stream must match the
+paired `deviceToken` and a `sessionId` already announced on the primary connection. Authenticating
+it never replaces the primary session.
+
+Each H.264 access unit occupies one WebSocket binary frame. Integers are unsigned big-endian:
+
+| Bytes | Meaning |
+|---:|---|
+| 0–3 | ASCII `TNMV` |
+| 4 | packet version `1` |
+| 5 | flags; bit 0 is keyframe, all other bits are zero |
+| 6–7 | encoder generation |
+| 8–11 | sequence number |
+| 12–19 | presentation timestamp in microseconds |
+| 20… | Annex-B H.264 access unit |
+
+The encoder is Baseline H.264, surface-input, up to 30 fps, one-second keyframe interval, no
+B-frames, and a 1920-pixel long-edge cap with even dimensions. Initial bitrate derives from pixel
+count and is clamped to 2–8 Mbps. Two samples above 1 MiB queued reduce it by 25%; ten seconds
+below 256 KiB increase it by 10%. Above 2 MiB, Android discards output until a requested keyframe.
+
+Rotation reuses the existing `MediaProjection`, replaces/resizes its virtual-display surface,
+reconfigures the encoder, and increments `generation`; the Mac flushes old-generation frames.
+Capture stops on user stop, window close, projection revocation, phone lock, unpair, or ten seconds
+without a direct video route. Secure/DRM windows may be blank. There is no audio, keyboard input,
+multi-touch, relay video, remote unlock, recording or screen-off capture.
+
+Android Accessibility gesture injection is optional and occurs only within an active,
+user-approved mirror session. Tennanova continues to set `canRetrieveWindowContent=false` and
+never reads the Android window-content tree; without Accessibility, video continues view-only.
+
 ## Files — capability `file.v1`
 
 Generic file transfer, both directions, over the same socket. The clipboard carries one image
@@ -502,6 +603,7 @@ is what lets a resume survive the app being killed.
 
 ## Versioning
 
-Additive fields are fine within `v:1` — receivers must ignore unknown keys. Any change to the
-meaning of an existing field, or any new message type that the peer must understand to behave
-correctly, requires bumping `v`.
+Additive fields and fully capability-gated message families are fine within `v:1` — receivers
+must ignore unknown keys and never send a gated family to a peer that did not advertise it. Any
+change to the meaning of an existing field, or an unconditional new message a peer must understand
+to behave correctly, requires bumping `v`.

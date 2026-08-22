@@ -62,6 +62,12 @@ object Proto {
      */
     const val FILE_TRANSFER_CAPABILITY = "file.v1"
 
+    /** Public-API Android display capture over a second authenticated socket. */
+    const val MIRROR_VIDEO_CAPABILITY = "mirror.video.v1"
+
+    /** Pointer gestures and system navigation while a mirror session is active. */
+    const val MIRROR_CONTROL_CAPABILITY = "mirror.control.v1"
+
     const val MAX_IMAGE_BYTES = 25 * 1024 * 1024
 
     /**
@@ -84,8 +90,13 @@ object Proto {
     const val FILE_ACK_EVERY_CHUNKS = 4
 
     /** Everything this build can do. SMS is added per-connection once it is switched on. */
-    val CAPABILITIES =
-        listOf(IMAGE_CLIPBOARD_CAPABILITY, OFFLINE_REPLY_CAPABILITY, FILE_TRANSFER_CAPABILITY)
+    val CAPABILITIES = listOf(
+        IMAGE_CLIPBOARD_CAPABILITY,
+        OFFLINE_REPLY_CAPABILITY,
+        FILE_TRANSFER_CAPABILITY,
+        MIRROR_VIDEO_CAPABILITY,
+        MIRROR_CONTROL_CAPABILITY
+    )
 
     /**
      * A transfer id. Hex only, so it can name a staging file without escaping the
@@ -190,7 +201,8 @@ object Messages {
         battery: Int?,
         pairingToken: String?,
         deviceToken: String?,
-        extraCapabilities: List<String> = emptyList()
+        extraCapabilities: List<String> = emptyList(),
+        transport: String? = null
     ): JSONObject = Proto.envelope("hello").apply {
         pairingToken?.let { put("token", it) }
         deviceToken?.let { put("deviceToken", it) }
@@ -202,14 +214,47 @@ object Messages {
             battery?.let { put("battery", it) }
         })
         put("capabilities", JSONArray(Proto.CAPABILITIES + extraCapabilities))
+        transport?.let { put("transport", it) }
     }
 
-    fun deviceState(battery: Int?, charging: Boolean, dnd: Boolean): JSONObject =
+    fun deviceState(
+        battery: Int?,
+        charging: Boolean,
+        dnd: Boolean,
+        transport: String? = null
+    ): JSONObject =
         Proto.envelope("device.state").apply {
             battery?.let { put("battery", it) }
             put("charging", charging)
             put("dnd", dnd)
+            transport?.let { put("transport", it) }
         }
+
+    fun mirrorState(
+        state: String,
+        requestId: String? = null,
+        sessionId: String? = null,
+        controlAvailable: Boolean,
+        reason: String? = null
+    ): JSONObject = Proto.envelope("mirror.state").apply {
+        put("state", state)
+        requestId?.let { put("requestId", it) }
+        sessionId?.let { put("sessionId", it) }
+        put("controlAvailable", controlAvailable)
+        reason?.let { put("reason", it) }
+    }
+
+    fun mirrorInputResult(
+        sessionId: String,
+        inputId: String,
+        ok: Boolean,
+        error: String? = null
+    ): JSONObject = Proto.envelope("mirror.input.result").apply {
+        put("sessionId", sessionId)
+        put("inputId", inputId)
+        put("ok", ok)
+        error?.let { put("error", it) }
+    }
 
     fun notifPosted(
         key: String,

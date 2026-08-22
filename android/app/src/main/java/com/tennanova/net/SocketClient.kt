@@ -210,6 +210,14 @@ internal class SocketClient(
         ws?.send(json.toString()) ?: false
     }
 
+    /** One complete application binary message, used by the dedicated mirror socket. */
+    fun sendBinary(bytes: ByteArray): Boolean = synchronized(sendLock) {
+        ws?.send(bytes.toByteString()) ?: false
+    }
+
+    /** Bytes OkHttp has accepted but not yet written to the network. */
+    val queuedBytes: Long get() = synchronized(sendLock) { ws?.queueSize() ?: 0L }
+
     /** Queues a JSON header and binary body without allowing another pair to interleave. */
     fun sendBinary(header: JSONObject, bytes: ByteArray): Boolean = synchronized(sendLock) {
         val socket = ws ?: return@synchronized false

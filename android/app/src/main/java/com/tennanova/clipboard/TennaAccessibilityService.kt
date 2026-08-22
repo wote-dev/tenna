@@ -1,11 +1,13 @@
 package com.tennanova.clipboard
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.GestureDescription
 import android.app.KeyguardManager
 import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.Context
 import android.graphics.PixelFormat
+import android.graphics.Path
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
@@ -16,6 +18,11 @@ import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
 import com.tennanova.core.ConnectionStatus
 import com.tennanova.core.RuntimeStatusStore
+import com.tennanova.mirror.MirrorInput
+import com.tennanova.mirror.MirrorPhase
+import com.tennanova.mirror.MirrorSessionCoordinator
+import java.lang.ref.WeakReference
+import java.util.ArrayDeque
 
 /**
  * Detects copy-related UI events and briefly owns a non-touchable accessibility window.
@@ -35,6 +42,8 @@ class TennaAccessibilityService : AccessibilityService() {
     private var lastCaptureAt = 0L
     private var lastClipStamp = UNKNOWN_CLIP_STAMP
     private var lastSeenFingerprint: String? = null
+    private val mirrorInputs = ArrayDeque<QueuedMirrorInput>()
+    private var gestureBusy = false
     private val clipboardRead = Runnable(::readClipboardAndRemoveOverlay)
     private val captureRequest = Runnable {
         captureScheduled = false
@@ -43,6 +52,8 @@ class TennaAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        active = WeakReference(this)
+        MirrorSessionCoordinator.refreshControlAvailability()
         // Adopt whatever is already on the clipboard as the baseline, so connecting doesn't
         // look like a fresh copy.
         lastClipStamp = currentClipStamp() ?: UNKNOWN_CLIP_STAMP
@@ -72,16 +83,23 @@ class TennaAccessibilityService : AccessibilityService() {
 
     override fun onInterrupt() {
         removeOverlay()
+        failMirrorInputs("control_unavailable")
         Log.w(TAG, "accessibility clipboard service interrupted")
     }
 
     override fun onDestroy() {
         removeOverlay()
+        failMirrorInputs("control_unavailable")
+        if (active.get() === this) active.clear()
+        MirrorSessionCoordinator.refreshControlAvailability()
         super.onDestroy()
     }
 
     override fun onUnbind(intent: android.content.Intent?): Boolean {
         removeOverlay()
+        failMirrorInputs("control_unavailable")
+        if (active.get() === this) active.clear()
+        MirrorSessionCoordinator.refreshControlAvailability()
         RuntimeStatusStore.updateClipboard(ClipboardAccessStatus.NEEDS_ACCESSIBILITY)
         return super.onUnbind(intent)
     }
@@ -204,12 +222,126 @@ class TennaAccessibilityService : AccessibilityService() {
         runCatching { getSystemService(WindowManager::class.java).removeViewImmediate(view) }
     }
 
+    private data class QueuedMirrorInput(
+        val input: MirrorInput,
+        val completion: (Boolean, String?) -> Unit
+    )
+
+    private fun enqueueMirrorInput(
+        input: MirrorInput,
+        completion: (Boolean, String?) -> Unit
+    ) {
+        handler.post {
+            if (mirrorInputs.size >= MAX_MIRROR_INPUTS) {
+                completion(false, "input_queue_full")
+                return@post
+            }
+            mirrorInputs.addLast(QueuedMirrorInput(input, completion))
+            dispatchNextMirrorInput()
+        }
+    }
+
+    private fun dispatchNextMirrorInput() {
+        if (gestureBusy) return
+        val queued = mirrorInputs.pollFirst() ?: return
+        val snapshot = MirrorSessionCoordinator.current()
+        val currentSession = snapshot.sessionId.takeIf { snapshot.phase == MirrorPhase.STREAMING }
+        if (currentSession == null || queued.input.sessionId != currentSession) {
+            queued.completion(false, "stale_session")
+            dispatchNextMirrorInput()
+            return
+        }
+        when (val input = queued.input) {
+            is MirrorInput.Global -> {
+                val action = when (input.action) {
+                    MirrorInput.Global.Action.BACK -> GLOBAL_ACTION_BACK
+                    MirrorInput.Global.Action.HOME -> GLOBAL_ACTION_HOME
+                    MirrorInput.Global.Action.RECENTS -> GLOBAL_ACTION_RECENTS
+                }
+                queued.completion(performGlobalAction(action), null)
+                dispatchNextMirrorInput()
+            }
+
+            is MirrorInput.Tap -> {
+                val (width, height) = displaySize()
+                val path = Path().apply { moveTo(input.x * width, input.y * height) }
+                dispatchMirrorGesture(path, TAP_DURATION_MS, queued)
+            }
+
+            is MirrorInput.Swipe -> {
+                val (width, height) = displaySize()
+                val first = input.points.first()
+                val path = Path().apply {
+                    moveTo(first.x * width, first.y * height)
+                    input.points.drop(1).forEach { lineTo(it.x * width, it.y * height) }
+                }
+                dispatchMirrorGesture(path, input.durationMs, queued)
+            }
+        }
+    }
+
+    private fun dispatchMirrorGesture(path: Path, durationMs: Long, queued: QueuedMirrorInput) {
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, durationMs))
+            .build()
+        gestureBusy = true
+        val accepted = dispatchGesture(
+            gesture,
+            object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    finishMirrorGesture(queued, true, null)
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    finishMirrorGesture(queued, false, "gesture_cancelled")
+                }
+            },
+            handler
+        )
+        if (!accepted) finishMirrorGesture(queued, false, "gesture_rejected")
+    }
+
+    private fun finishMirrorGesture(
+        queued: QueuedMirrorInput,
+        ok: Boolean,
+        error: String?
+    ) {
+        gestureBusy = false
+        queued.completion(ok, error)
+        dispatchNextMirrorInput()
+    }
+
+    private fun failMirrorInputs(error: String) {
+        handler.post {
+            while (mirrorInputs.isNotEmpty()) mirrorInputs.removeFirst().completion(false, error)
+        }
+    }
+
+    private fun displaySize(): Pair<Float, Float> {
+        val bounds = getSystemService(WindowManager::class.java).maximumWindowMetrics.bounds
+        return bounds.width().toFloat() to bounds.height().toFloat()
+    }
+
     companion object {
         private const val TAG = "TennaClipboard"
         private const val EVENT_SETTLE_MS = 80L
         private const val FOCUS_SETTLE_MS = 32L
         private const val CAPTURE_COOLDOWN_MS = 250L
         private const val UNKNOWN_CLIP_STAMP = -1L
+        private const val TAP_DURATION_MS = 50L
+        private const val MAX_MIRROR_INPUTS = 16
+        private var active = WeakReference<TennaAccessibilityService>(null)
+
+        val isReady: Boolean get() = active.get() != null
+
+        fun dispatchMirrorInput(
+            input: MirrorInput,
+            completion: (Boolean, String?) -> Unit
+        ): Boolean {
+            val service = active.get() ?: return false
+            service.enqueueMirrorInput(input, completion)
+            return true
+        }
 
         fun isEnabled(context: Context): Boolean {
             val expected = ComponentName(context, TennaAccessibilityService::class.java)

@@ -3,6 +3,8 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
 
     <!-- SMS mirroring. The first runtime permissions in this app: everything before them
          was a deep link to a Settings screen. All three are optional and requested only
@@ -89,8 +91,10 @@
             </intent-filter>
         </service>
 
-        <!-- One-time user-enabled service used only to notice copy actions and obtain
-             the brief window focus Android requires before reading the clipboard. -->
+        <!-- One-time user-enabled service used to notice copy actions and obtain the brief
+             focus Android requires before reading the clipboard. During an active,
+             user-approved mirror session it can also dispatch bounded gestures and global
+             navigation actions. It never retrieves the Android window-content tree. -->
         <service
             android:name=".clipboard.TennaAccessibilityService"
             android:exported="true"
@@ -103,6 +107,11 @@
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
         </service>
+
+        <service
+            android:name=".mirror.MirrorProjectionService"
+            android:exported="false"
+            android:foregroundServiceType="mediaProjection" />
 
         <provider
             android:name=".clipboard.ClipboardFileProvider"

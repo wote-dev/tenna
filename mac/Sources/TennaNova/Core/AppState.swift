@@ -86,6 +86,11 @@ final class AppState {
     /// and the Files pane says so rather than accepting a drop nothing will carry.
     var supportsFileTransfer: Bool { capabilities.contains(Proto.fileTransferCapability) }
 
+    var supportsMirroring: Bool {
+        capabilities.contains(Proto.mirrorVideoCapability) &&
+        capabilities.contains(Proto.mirrorControlCapability)
+    }
+
     /// Everything the phone has mirrored, grouped into conversations.
     let history = NotificationStore()
 
@@ -98,6 +103,9 @@ final class AppState {
     /// Files going each way, in a form the window can draw and observe.
     let transfers = TransferCenter()
 
+    /// The dedicated screen-sharing state and renderer used by the mirror window.
+    let mirror = MirrorCenter()
+
     @ObservationIgnored private var server: Server?
     @ObservationIgnored private var notifications: NotificationPresenter?
     @ObservationIgnored private var clipboard: PasteboardBridge?
@@ -107,6 +115,10 @@ final class AppState {
     @ObservationIgnored private let pathQueue = DispatchQueue(label: "com.tennanova.path")
     @ObservationIgnored private let store = PairingStore()
     @ObservationIgnored private var authenticatedSessionID: UUID?
+    @ObservationIgnored private var mirrorStreamSessionID: UUID?
+    @ObservationIgnored private var announcedMirrorSessionID: String?
+    @ObservationIgnored private var cancelledMirrorRequestID: String?
+    @ObservationIgnored private var currentTransport: MirrorRoute?
     @ObservationIgnored private var peerCapabilities = Set<String>()
     @ObservationIgnored private var pendingBinary: PendingBinary?
     /// Shared with `NotificationPresenter` so the cards and the window read one store.
@@ -119,6 +131,10 @@ final class AppState {
         self.icons = IconCatalog(cache: iconCache)
         self.files = TransferEngine(center: transfers)
         self.files.transport = self
+        self.mirror.renderer.onRecoveryNeeded = { [weak self] sessionId in
+            guard !sessionId.isEmpty else { return }
+            self?.send(MirrorKeyframeRequest(sessionId: sessionId))
+        }
     }
 
     private enum PendingBinary {
@@ -175,6 +191,7 @@ final class AppState {
                 // that same server queue.
                 self.authenticatedSessionID = nil
                 self.peerCapabilities.removeAll()
+                self.announcedMirrorSessionID = nil
                 self.pendingBinary = nil
                 self.iconRequests.reset()
                 self.clipboard?.setPeerSupportsImages(false)
@@ -184,11 +201,17 @@ final class AppState {
                 // A call this Mac can no longer act on must not keep a live card on
                 // screen: every button on it would now go nowhere.
                 self.calls.dropLiveCalls()
+                self.server?.closeMirror()
                 Task { @MainActor in
                     self.capabilities = []
                     self.status = .waitingForPhone
                     self.pairedDevice = nil
+                    self.mirror.disconnected()
                 }
+            }
+            server.onMirrorSessionChanged = { [weak self] session in
+                guard let self, session == nil else { return }
+                self.mirrorStreamSessionID = nil
             }
             server.onActivityChanged = { [weak self] activity in
                 Task { @MainActor in self?.serverActivity = activity }
@@ -268,7 +291,9 @@ final class AppState {
     }
 
     /// Forgets the paired phone so a new one can be paired.
+    @MainActor
     func unpair() {
+        stopMirroring()
         store.clear()
         store.rotatePairingToken()
         rebuildPairingPayload()
@@ -289,6 +314,22 @@ final class AppState {
     // MARK: - Message routing
 
     private func handle(env: Envelope, data: Data, session: PeerSession) {
+        if env.type == "mirror.stream.hello" {
+            handleMirrorStreamHello(data: data, session: session)
+            return
+        }
+        if mirrorStreamSessionID == session.id {
+            guard env.type == "mirror.config",
+                  let config = try? Wire.decode(MirrorConfig.self, from: data),
+                  config.isValid,
+                  config.sessionId == announcedMirrorSessionID else {
+                Log.warn("closing mirror stream after invalid \(env.type)")
+                session.close()
+                return
+            }
+            Task { @MainActor in self.mirror.apply(config) }
+            return
+        }
         if env.type != "hello", authenticatedSessionID != session.id {
             Log.warn("closing peer that sent \(env.type) before authentication")
             session.close()
@@ -301,10 +342,38 @@ final class AppState {
 
         case "device.state":
             if let m = try? Wire.decode(DeviceState.self, from: data) {
+                if let value = m.transport { currentTransport = MirrorRoute(rawValue: value) }
                 Task { @MainActor in
                     if let b = m.battery { self.battery = b }
                     self.charging = m.charging ?? false
+                    if let value = m.transport { self.mirror.updateRoute(value) }
                 }
+            }
+
+        case "mirror.state":
+            if let message = try? Wire.decode(MirrorStateMessage.self, from: data),
+               let phase = MirrorPhase(rawValue: message.state) {
+                if let cancelled = cancelledMirrorRequestID,
+                   message.requestId == cancelled,
+                   phase == .starting || phase == .streaming {
+                    session.send(MirrorStop(sessionId: message.sessionId))
+                    return
+                }
+                if phase.isActive, let id = message.sessionId {
+                    announcedMirrorSessionID = id
+                } else if phase == .stopped || phase == .error {
+                    announcedMirrorSessionID = nil
+                    server?.closeMirror()
+                }
+                Task { @MainActor in
+                    guard self.mirror.apply(message) else { return }
+                    if phase.isActive { MirrorWindowOpener.show() }
+                }
+            }
+
+        case "mirror.input.result":
+            if let result = try? Wire.decode(MirrorInputResult.self, from: data) {
+                Task { @MainActor in self.mirror.noteInputResult(result) }
             }
 
         case "notif.posted":
@@ -502,6 +571,7 @@ final class AppState {
         server?.activate(session)
         let caps = Set(hello.capabilities ?? [])
         peerCapabilities = caps
+        currentTransport = hello.transport.flatMap(MirrorRoute.init(rawValue:))
         pendingBinary = nil
         clipboard?.setPeerSupportsImages(
             peerCapabilities.contains(Proto.imageClipboardCapability)
@@ -526,6 +596,7 @@ final class AppState {
             self.isPaired = true
             self.pairedDeviceName = hello.device.name
             self.capabilities = caps
+            self.mirror.updateRoute(hello.transport)
             // The pairing token was just spent and rotated. Without rebuilding here the
             // menu bar keeps rendering a QR for the dead one, and the next scan — which
             // is exactly what a user does when the phone drops — fails with bad_token.
@@ -541,6 +612,14 @@ final class AppState {
     }
 
     private func handleBinary(_ data: Data, session: PeerSession) {
+        if mirrorStreamSessionID == session.id {
+            guard let packet = MirrorVideoPacket.parse(data) else {
+                Log.warn("discarded malformed mirror video packet")
+                return
+            }
+            Task { @MainActor in self.mirror.receive(packet) }
+            return
+        }
         guard authenticatedSessionID == session.id, let pending = pendingBinary else {
             Log.warn("received binary data with no authenticated header")
             return
@@ -579,9 +658,104 @@ final class AppState {
         }
     }
 
+    private func handleMirrorStreamHello(data: Data, session: PeerSession) {
+        guard mirrorStreamSessionID != session.id,
+              let hello = try? Wire.decode(MirrorStreamHello.self, from: data) else {
+            session.send(MirrorStreamAck(ok: false, reason: "unauthorized")) { session.close() }
+            return
+        }
+        let expectedToken = store.deviceToken(for: hello.deviceId)
+        guard MirrorStreamAuthentication.accepts(
+                hello,
+                expectedToken: expectedToken,
+                announcedSessionId: announcedMirrorSessionID,
+                localRoute: currentTransport?.isLocal == true,
+                peerSupportsVideo: peerCapabilities.contains(Proto.mirrorVideoCapability),
+                primaryAuthenticated: authenticatedSessionID != nil
+              ) else {
+            let identityMatches = expectedToken != nil && expectedToken == hello.deviceToken
+            session.send(MirrorStreamAck(
+                ok: false,
+                reason: identityMatches ? "not_ready" : "unauthorized"
+            )) { session.close() }
+            return
+        }
+        mirrorStreamSessionID = session.id
+        server?.activateMirror(session)
+        session.send(MirrorStreamAck(ok: true, reason: nil))
+        Log.info("authenticated auxiliary mirror stream")
+    }
+
     /// Returns false when there is no authenticated session, so a caller that owes the
     /// user feedback — a reply typed into the window — can say so instead of dropping it.
     // MARK: - Actions from the window
+
+    @MainActor
+    func beginMirroring() {
+        guard status.isConnected, supportsMirroring, mirror.canMirror else { return }
+        if mirror.phase.isActive { return }
+        let requestId = UUID().uuidString
+        cancelledMirrorRequestID = nil
+        mirror.prepareMacRequest(requestId)
+        guard send(MirrorRequest(requestId: requestId)) else {
+            mirror.disconnected()
+            return
+        }
+        MirrorWindowOpener.show()
+    }
+
+    @MainActor
+    func mirrorWindowAppeared() {
+        mirror.windowAppeared()
+        if mirror.phase == .idle { beginMirroring() }
+    }
+
+    @MainActor
+    func mirrorWindowDisappeared() {
+        mirror.windowDisappeared()
+        stopMirroring()
+    }
+
+    @MainActor
+    func stopMirroring() {
+        guard mirror.phase.isActive || mirror.sessionId != nil else { return }
+        cancelledMirrorRequestID = mirror.requestId
+        send(MirrorStop(sessionId: mirror.sessionId))
+        announcedMirrorSessionID = nil
+        server?.closeMirror()
+        mirror.cancelledLocally()
+    }
+
+    @MainActor
+    func sendMirrorGlobal(_ action: String) {
+        guard let sessionId = mirror.sessionId, mirror.controlAvailable else { return }
+        send(MirrorInputMessage(
+            sessionId: sessionId,
+            inputId: UUID().uuidString,
+            kind: "global",
+            x: nil,
+            y: nil,
+            points: nil,
+            durationMs: nil,
+            action: action
+        ))
+    }
+
+    @MainActor
+    func sendMirrorInteraction(_ interaction: MirrorInteraction) {
+        guard let sessionId = mirror.sessionId, mirror.controlAvailable else { return }
+        let id = UUID().uuidString
+        switch interaction {
+        case .tap(let x, let y):
+            send(MirrorInputMessage(sessionId: sessionId, inputId: id, kind: "tap",
+                                    x: x, y: y, points: nil, durationMs: nil, action: nil))
+        case .swipe(let points, let durationMs):
+            guard points.count >= 2 else { return }
+            send(MirrorInputMessage(sessionId: sessionId, inputId: id, kind: "swipe",
+                                    x: nil, y: nil, points: Array(points.prefix(32)),
+                                    durationMs: min(max(durationMs, 80), 1_000), action: nil))
+        }
+    }
 
     /// Sends a reply into a conversation and echoes it into the transcript immediately.
     ///

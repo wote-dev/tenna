@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.delay
 import com.tennanova.net.ConnectionTransport
+import com.tennanova.mirror.MirrorSnapshot
 import kotlinx.coroutines.launch
 
 data class MainUiState(
@@ -41,6 +42,8 @@ data class MainUiState(
     val calls: CallAccessStatus = CallAccessStatus.OFF,
     val peerSupportsImages: Boolean = false,
     val peerSupportsFiles: Boolean = false,
+    val peerSupportsMirror: Boolean = false,
+    val mirror: MirrorSnapshot = MirrorSnapshot(),
     val transfers: List<TransferItem> = emptyList(),
     val lastTransfer: String? = null,
     val message: String? = null,
@@ -117,6 +120,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             calls = runtime.calls,
             peerSupportsImages = runtime.peerSupportsImages,
             peerSupportsFiles = runtime.peerSupportsFiles,
+            peerSupportsMirror = runtime.peerSupportsMirror,
+            mirror = runtime.mirror,
             transfers = runtime.transfers,
             lastTransfer = runtime.lastTransfer,
             message = localMessage

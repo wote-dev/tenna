@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Tennanova</string>
-    <string name="accessibility_service_label">Tennanova clipboard sync</string>
-    <string name="accessibility_service_description">Detects copy actions so clipboard text and images can sync directly with your paired Mac. It does not inspect or store screen content.</string>
+    <string name="accessibility_service_label">Tennanova clipboard and mirror controls</string>
+    <string name="accessibility_service_description">Detects copy actions for clipboard sync and, only during a user-approved mirror session, performs taps and swipes requested from your paired Mac. It never retrieves the Android window-content tree.</string>
 </resources>

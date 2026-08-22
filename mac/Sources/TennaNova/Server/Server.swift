@@ -39,12 +39,15 @@ final class Server {
     /// The authenticated connection. New TCP/TLS peers remain candidates until AppState
     /// validates their hello, so a port probe or a second Mac cannot knock this one off.
     private(set) var session: PeerSession?
+    /// The one video-only peer. It is authenticated separately and never becomes primary.
+    private(set) var mirrorSession: PeerSession?
     private var peers: [UUID: PeerSession] = [:]
     private var activityPeerID: UUID?
     private var activity: ServerActivity = .idle
     private var activityVersion = 0
 
     var onSessionChanged: ((PeerSession?) -> Void)?
+    var onMirrorSessionChanged: ((PeerSession?) -> Void)?
     var onActivityChanged: ((ServerActivity) -> Void)?
     var onMessage: ((PeerSession, Envelope, Data) -> Void)?
     var onBinary: ((PeerSession, Data) -> Void)?
@@ -98,6 +101,7 @@ final class Server {
         peers.values.forEach { $0.close() }
         peers.removeAll()
         session = nil
+        mirrorSession = nil
         activityPeerID = nil
         emitActivity(.idle)
         listener?.cancel()
@@ -114,6 +118,25 @@ final class Server {
         emitActivity(.idle)
         onSessionChanged?(peer)
         if previous?.id != peer.id { previous?.close() }
+    }
+
+    /// Retains a separately authenticated video peer without replacing control traffic.
+    func activateMirror(_ peer: PeerSession) {
+        guard peers[peer.id] != nil else { return }
+        let previous = mirrorSession
+        mirrorSession = peer
+        if activityPeerID == peer.id {
+            activityPeerID = nil
+            emitActivity(.idle)
+        }
+        onMirrorSessionChanged?(peer)
+        if previous?.id != peer.id { previous?.close() }
+    }
+
+    func closeMirror() {
+        mirrorSession?.close()
+        mirrorSession = nil
+        onMirrorSessionChanged?(nil)
     }
 
     /// Preserves the reason long enough for the menu to explain a rejected scan.
@@ -169,6 +192,9 @@ final class Server {
                 self.session = nil
                 self.emitActivity(.idle)
                 self.onSessionChanged?(nil)
+            } else if self.mirrorSession?.id == peerID {
+                self.mirrorSession = nil
+                self.onMirrorSessionChanged?(nil)
             } else if self.activityPeerID == peerID {
                 self.activityPeerID = nil
                 if case .failed = self.activity {

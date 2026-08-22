@@ -146,6 +146,17 @@ struct MenuBarView: View {
             if let latest = state.history.threads.first, let message = latest.latest {
                 StatusRow("\(latest.title): \(message.body)", symbol: "bubble.left")
             }
+            if state.supportsMirroring {
+                Button {
+                    state.beginMirroring()
+                } label: {
+                    Label("Mirror Phone", systemImage: "play.rectangle")
+                        .frame(maxWidth: .infinity)
+                }
+                .adaptiveGlassButton()
+                .disabled(!state.mirror.canMirror)
+                .padding(.top, 6)
+            }
         }
     }
 

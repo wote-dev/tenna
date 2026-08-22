@@ -4,7 +4,7 @@
 
 # Tennanova
 
-**Your Android phone's notifications, messages, calls and clipboard, on your Mac.**
+**Your Android phone's notifications, messages, calls, clipboard and screen, on your Mac.**
 Local-only. No account, no cloud service, no telemetry.
 
 [![CI](https://github.com/wote-dev/tenna/actions/workflows/ci.yml/badge.svg)](https://github.com/wote-dev/tenna/actions/workflows/ci.yml)
@@ -14,8 +14,8 @@ Local-only. No account, no cloud service, no telemetry.
 
 </div>
 
-Two apps talking directly to each other over one pinned TLS WebSocket: on your LAN, through a
-USB tunnel, or through a relay that can only see ciphertext.
+Two apps talking over a pinned TLS WebSocket: on your LAN, through a USB tunnel, or through a
+relay that can only see ciphertext. Screen video uses a second pinned socket and never uses the relay.
 
 ```
 macOS (SwiftUI, menu bar + window)  ◀── TLS/WSS ──▶  Android (Compose)
@@ -44,6 +44,8 @@ macOS (SwiftUI, menu bar + window)  ◀── TLS/WSS ──▶  Android (Compos
 - **Send files both ways.** Drop them on the Mac window or its Dock icon; share anything to
   Tennanova on the phone. Chunked, checksummed, and resumed rather than restarted when the
   connection drops.
+- **Mirror and control the Android screen** in a dedicated Mac window over local Wi-Fi or USB.
+  Click, drag and scroll, or use Back, Home and Recents. Android approves every session.
 - A Mac window that keeps **Messages** and **Notifications** in separate lists, plus a Calls
   pane.
 
@@ -55,7 +57,7 @@ Each of these is a decision, not a backlog item:
 |---|---|
 | **Call audio** | Android does not let any third-party app capture voice-call audio. `CAPTURE_AUDIO_OUTPUT` is privileged, and the accessibility workaround was closed in 2022. The Mac is a control surface; the sound stays on the phone. Every screen with a call button says so. |
 | **Mute during a call** | Needs an `InCallService`, which needs the default-dialer role. A button that silently does nothing is worse than no button. |
-| **Screen mirroring, webcam** | Different problem, different app. |
+| **Webcam mode or mirror recording** | Screen mirroring is live and user-approved only; it does not expose a camera, record, or carry audio. |
 | **MMS** | The SMS provider gives text threads without the app being the default SMS app. MMS does not. Out of scope rather than half-supported. |
 
 ---
@@ -314,6 +316,27 @@ The full mechanism, including why the focus window has to be configured the way 
 > This is built for a personally sideloaded app. Distributing it through Google Play would
 > require a separate Accessibility policy review and prominent in-app disclosure.
 
+### Screen mirroring
+
+Choose **Mirror Phone** from the Mac dashboard or menu bar, or start it from the Android
+dashboard. Android's system capture dialog appears for every session; Tennanova cannot remember
+or bypass that approval. Video is H.264 at up to 30 fps with a 1920-pixel long-edge cap, carried
+over a separate pinned-TLS WebSocket so files, calls, notifications and clipboard messages stay
+responsive.
+
+Mirroring works only on a direct local Wi-Fi or USB route. It is refused while the primary
+connection is relayed. The phone must remain on and unlocked. Locking it, using Android's system
+screen-sharing stop control, unpairing, closing the Mac mirror window, or losing the direct video
+route stops capture and releases the encoder and projection. Rotation reconfigures the stream
+without asking for approval again.
+
+Accessibility is optional. When enabled, Tennanova injects bounded tap and swipe gestures and
+Back, Home or Recents global actions only for the active, user-approved mirror session. It still
+never retrieves Android's window-content tree. Without Accessibility, mirroring remains available
+as view-only. Secure or DRM-protected windows may appear blank by Android design. Audio, keyboard
+input, multi-touch, remote unlocking, screen-off capture, recording and relay video are not
+included.
+
 ### Files
 
 The clipboard carries one image at a time and still does. Files are a separate channel,
@@ -409,11 +432,12 @@ the relay, which carries ciphertext.
 | Permission | What it enables | Optional? |
 |---|---|---|
 | Notification access | Everything: notifications, replies, and calls | Required |
-| Accessibility | Phone → Mac clipboard capture only | Optional; everything else works without it |
+| Accessibility | Phone → Mac clipboard capture; gesture control during an approved mirror session | Optional; mirroring remains view-only without it |
 | `READ_SMS` / `SEND_SMS` | SMS threads and sending | Optional; asked for only when you turn SMS on |
 | `READ_CONTACTS` | Resolving numbers to names on the phone | Optional, with SMS |
 | `ANSWER_PHONE_CALLS`, `READ_PHONE_STATE` | Answering a dialer whose notification carries no buttons | Optional; calls still ring without it |
-| `POST_NOTIFICATIONS` | Telling you a file arrived from the Mac | Optional; the dashboard lists transfers either way |
+| `POST_NOTIFICATIONS` | File-arrival notices and Mac-started mirror approval notices | Optional; open the Android dashboard to approve if denied |
+| MediaProjection foreground service | A currently approved screen-mirror session | Android asks for capture approval every session |
 | `INTERNET`, `ACCESS_NETWORK_STATE` | The socket itself | Required |
 
 There is deliberately no `CAPTURE_AUDIO_OUTPUT` (privileged), no default-SMS-app role, and no

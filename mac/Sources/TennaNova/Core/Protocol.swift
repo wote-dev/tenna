@@ -35,6 +35,8 @@ enum Proto {
     /// Generic file transfer, both directions, chunked and resumable. The clipboard
     /// carries one image at a time and stays that way; this is everything else.
     static let fileTransferCapability = "file.v1"
+    static let mirrorVideoCapability = "mirror.video.v1"
+    static let mirrorControlCapability = "mirror.control.v1"
 
     static let maxImageBytes = 25 * 1024 * 1024
 
@@ -103,6 +105,8 @@ struct Hello: Codable {
     var deviceToken: String?    // long-lived, every subsequent connection
     var device: DeviceInfo
     var capabilities: [String]?
+    /// The route carrying this primary session. Mirroring is deliberately local-only.
+    var transport: String? = nil
 }
 
 struct HelloAck: Codable {
@@ -129,7 +133,9 @@ struct HelloAck: Codable {
     var relayHost: String?
     var relayRoom: String?
     var capabilities: [String] = [Proto.imageClipboardCapability,
-                                  Proto.fileTransferCapability]
+                                  Proto.fileTransferCapability,
+                                  Proto.mirrorVideoCapability,
+                                  Proto.mirrorControlCapability]
 }
 
 /// Sent mid-session when the Mac gains or loses an address — joining a phone hotspot
@@ -174,6 +180,99 @@ struct DeviceState: Codable {
     var battery: Int?
     var charging: Bool?
     var dnd: Bool?
+    var transport: String? = nil
+}
+
+// MARK: - Screen mirroring
+
+struct MirrorRequest: Codable {
+    var v = Proto.version
+    var type = "mirror.request"
+    var requestId: String
+}
+
+struct MirrorStateMessage: Codable {
+    var v = Proto.version
+    var type = "mirror.state"
+    var requestId: String?
+    var sessionId: String?
+    var state: String
+    var controlAvailable: Bool
+    var reason: String?
+}
+
+struct MirrorStop: Codable {
+    var v = Proto.version
+    var type = "mirror.stop"
+    var sessionId: String?
+}
+
+struct MirrorKeyframeRequest: Codable {
+    var v = Proto.version
+    var type = "mirror.keyframe.request"
+    var sessionId: String
+}
+
+struct MirrorStreamHello: Codable {
+    var v = Proto.version
+    var type = "mirror.stream.hello"
+    var deviceId: String
+    var deviceToken: String
+    var sessionId: String
+}
+
+struct MirrorStreamAck: Codable {
+    var v = Proto.version
+    var type = "mirror.stream.ack"
+    var ok: Bool
+    var reason: String?
+}
+
+struct MirrorConfig: Codable, Equatable {
+    var v = Proto.version
+    var type = "mirror.config"
+    var sessionId: String
+    var generation: Int
+    var codec: String
+    var width: Int
+    var height: Int
+    var rotation: Int
+    var sps: Data
+    var pps: Data
+
+    var isValid: Bool {
+        !sessionId.isEmpty && (0...0xffff).contains(generation) && codec == "h264" &&
+        width > 0 && height > 0 && width <= 1920 && height <= 1920 &&
+        !sps.isEmpty && !pps.isEmpty
+    }
+}
+
+struct MirrorPoint: Codable, Equatable {
+    var x: Double
+    var y: Double
+    var t: Double
+}
+
+struct MirrorInputMessage: Codable {
+    var v = Proto.version
+    var type = "mirror.input"
+    var sessionId: String
+    var inputId: String
+    var kind: String
+    var x: Double?
+    var y: Double?
+    var points: [MirrorPoint]?
+    var durationMs: Int?
+    var action: String?
+}
+
+struct MirrorInputResult: Codable {
+    var v = Proto.version
+    var type = "mirror.input.result"
+    var sessionId: String
+    var inputId: String
+    var ok: Bool
+    var error: String?
 }
 
 // MARK: - Notifications

@@ -51,6 +51,9 @@ import com.tennanova.net.RelayBridge
 import com.tennanova.net.SocketClient
 import com.tennanova.net.MacDiscovery
 import com.tennanova.net.SubnetScanner
+import com.tennanova.mirror.MirrorInputValidator
+import com.tennanova.mirror.MirrorProjectionService
+import com.tennanova.mirror.MirrorSessionCoordinator
 import org.json.JSONObject
 import com.tennanova.files.FileTransfers
 import com.tennanova.files.FileTransport
@@ -75,6 +78,7 @@ class TennaNotificationListener : NotificationListenerService() {
     private var authenticated = false
     private var peerSupportsImages = false
     private var peerSupportsFiles = false
+    private var peerSupportsMirror = false
 
     /**
      * The one header still waiting for its binary frame.
@@ -187,6 +191,7 @@ class TennaNotificationListener : NotificationListenerService() {
         ).also { it.sweepStaleStaging() }
 
         RuntimeStatusStore.attach(this)
+        MirrorSessionCoordinator.attachSender { socket?.send(it) == true }
         RuntimeStatusStore.updatePairing(settings.isPairingConfirmed, settings.macName)
         RuntimeStatusStore.updateClipboard(
             if (TennaAccessibilityService.isEnabled(this)) ClipboardAccessStatus.READY
@@ -241,6 +246,7 @@ class TennaNotificationListener : NotificationListenerService() {
             connectivity.unregisterNetworkCallback(allNetworksCallback)
         }
         RuntimeStatusStore.detach(this)
+        MirrorSessionCoordinator.attachSender(null)
         super.onDestroy()
     }
 
@@ -254,6 +260,7 @@ class TennaNotificationListener : NotificationListenerService() {
         socket?.stop()
         socket = null
         if (!settings.isPaired) {
+            MirrorSessionCoordinator.cancel(this, "transport_lost")
             Log.i(TAG, "not paired yet — socket idle")
             RuntimeStatusStore.updateConnection(ConnectionStatus.UNPAIRED)
             return
@@ -406,7 +413,22 @@ class TennaNotificationListener : NotificationListenerService() {
                 extraCapabilities = buildList {
                     if (smsAvailable()) add(Proto.SMS_CAPABILITY)
                     if (settings.callsEnabled) add(Proto.CALL_CAPABILITY)
-                }
+                },
+                transport = socket?.transport?.wire
+            )
+        )
+    }
+
+    private fun publishDeviceState() {
+        val battery = getSystemService(BatteryManager::class.java)
+        val notifications = getSystemService(android.app.NotificationManager::class.java)
+        socket?.send(
+            Messages.deviceState(
+                battery = battery?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY),
+                charging = battery?.isCharging == true,
+                dnd = notifications != null && notifications.currentInterruptionFilter !=
+                    android.app.NotificationManager.INTERRUPTION_FILTER_ALL,
+                transport = socket?.transport?.wire
             )
         )
     }
@@ -434,11 +456,32 @@ class TennaNotificationListener : NotificationListenerService() {
                         array.optString(it) == Proto.FILE_TRANSFER_CAPABILITY
                     }
                 } == true
-                RuntimeStatusStore.updatePeerCapabilities(peerSupportsImages, peerSupportsFiles)
+                val capabilities = msg.optJSONArray("capabilities")
+                val hasMirrorVideo = capabilities?.let { array ->
+                    (0 until array.length()).any {
+                        array.optString(it) == Proto.MIRROR_VIDEO_CAPABILITY
+                    }
+                } == true
+                val hasMirrorControl = capabilities?.let { array ->
+                    (0 until array.length()).any {
+                        array.optString(it) == Proto.MIRROR_CONTROL_CAPABILITY
+                    }
+                } == true
+                peerSupportsMirror = hasMirrorVideo && hasMirrorControl
+                RuntimeStatusStore.updatePeerCapabilities(
+                    peerSupportsImages,
+                    peerSupportsFiles,
+                    peerSupportsMirror
+                )
+                MirrorSessionCoordinator.updateConnection(
+                    peerSupportsMirror,
+                    socket?.transport ?: ConnectionTransport.NONE
+                )
                 exhaustedRounds = 0
                 socket?.sessionAuthenticated()
                 setAuthenticated(true)
                 RuntimeStatusStore.updateConnection(ConnectionStatus.CONNECTED)
+                publishDeviceState()
                 // Populate the Mac and rebuild action mappings only after authentication.
                 activeNotifications?.forEach { handlePosted(it, resync = true) }
                 startSmsMirror()
@@ -476,6 +519,65 @@ class TennaNotificationListener : NotificationListenerService() {
         if (!authenticated) return
 
         when (msg.optString("type")) {
+
+            "mirror.request" -> {
+                MirrorSessionCoordinator.requestFromMac(this, msg.optString("requestId"))
+            }
+
+            "mirror.stop" -> {
+                MirrorSessionCoordinator.cancel(
+                    this,
+                    reason = "window_closed",
+                    sessionId = msg.optString("sessionId").ifEmpty { null }
+                )
+            }
+
+            "mirror.keyframe.request" -> {
+                val sessionId = msg.optString("sessionId")
+                if (sessionId == MirrorSessionCoordinator.current().sessionId) {
+                    MirrorProjectionService.requestKeyFrame(sessionId)
+                }
+            }
+
+            "mirror.input" -> {
+                val mirror = MirrorSessionCoordinator.current()
+                val validation = MirrorInputValidator.parse(
+                    msg,
+                    mirror.sessionId.takeIf {
+                        mirror.phase == com.tennanova.mirror.MirrorPhase.STREAMING
+                    }
+                )
+                val input = validation.input
+                if (input == null) {
+                    socket?.send(
+                        Messages.mirrorInputResult(
+                            msg.optString("sessionId"),
+                            msg.optString("inputId"),
+                            false,
+                            validation.error ?: "invalid_input"
+                        )
+                    )
+                } else if (!TennaAccessibilityService.dispatchMirrorInput(input) { ok, error ->
+                        socket?.send(
+                            Messages.mirrorInputResult(
+                                input.sessionId,
+                                input.inputId,
+                                ok,
+                                error
+                            )
+                        )
+                    }
+                ) {
+                    socket?.send(
+                        Messages.mirrorInputResult(
+                            input.sessionId,
+                            input.inputId,
+                            false,
+                            "control_unavailable"
+                        )
+                    )
+                }
+            }
 
             "notif.reply" -> {
                 val key = msg.optString("key")
@@ -1160,9 +1262,14 @@ class TennaNotificationListener : NotificationListenerService() {
         if (!value) {
             peerSupportsImages = false
             peerSupportsFiles = false
+            peerSupportsMirror = false
             pendingBinary = null
             imageJob.incrementAndGet()
-            RuntimeStatusStore.updatePeerCapabilities(false)
+            RuntimeStatusStore.updatePeerCapabilities(false, false, false)
+            MirrorSessionCoordinator.updateConnection(
+                false,
+                socket?.transport ?: ConnectionTransport.NONE
+            )
             // Paused, not failed: the partials stay on disk and the next connection
             // continues them.
             files?.sessionLost()

@@ -40,6 +40,8 @@ struct ProtocolTests {
         let decoded = try Wire.decode(HelloAck.self, from: Wire.encode(ack))
         #expect(decoded.capabilities.contains(Proto.imageClipboardCapability))
         #expect(decoded.capabilities.contains(Proto.fileTransferCapability))
+        #expect(decoded.capabilities.contains(Proto.mirrorVideoCapability))
+        #expect(decoded.capabilities.contains(Proto.mirrorControlCapability))
     }
 
     @Test func legacyHelloWithoutCapabilitiesStillDecodes() throws {

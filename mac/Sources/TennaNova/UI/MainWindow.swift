@@ -71,7 +71,10 @@ struct MainWindow: View {
         }
         // Captured once, from the only place SwiftUI hands it out, and used from the app
         // delegate when the Dock icon is clicked with no window on screen.
-        .task { MainWindowOpener.reopen = { openWindow(id: AppScene.mainWindow) } }
+        .task {
+            MainWindowOpener.reopen = { openWindow(id: AppScene.mainWindow) }
+            MirrorWindowOpener.reopen = { openWindow(id: AppScene.mirrorWindow) }
+        }
     }
 
     /// The live call, unless the Calls pane is already showing it in full.

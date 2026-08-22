@@ -26,6 +26,14 @@ struct TennaNovaApp: App {
             TennaCommands()
         }
 
+        Window("Phone Mirror", id: AppScene.mirrorWindow) {
+            MirrorView()
+                .environment(delegate.state)
+        }
+        .defaultSize(width: 430, height: 780)
+        .windowResizability(.contentMinSize)
+        .windowToolbarStyle(.unified(showsTitle: true))
+
         MenuBarExtra {
             MenuBarView()
                 .environment(delegate.state)
@@ -53,6 +61,7 @@ struct TennaNovaApp: App {
 
 enum AppScene {
     static let mainWindow = "main"
+    static let mirrorWindow = "phone-mirror"
 }
 
 /// `openWindow` is handed out only inside a view, and neither the app delegate nor the
@@ -61,6 +70,16 @@ enum AppScene {
 /// anywhere afterwards.
 @MainActor
 enum MainWindowOpener {
+    static var reopen: (() -> Void)?
+
+    static func show() {
+        reopen?()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@MainActor
+enum MirrorWindowOpener {
     static var reopen: (() -> Void)?
 
     static func show() {

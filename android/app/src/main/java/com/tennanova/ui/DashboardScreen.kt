@@ -79,6 +79,7 @@ import com.tennanova.files.TransferDirection
 import com.tennanova.files.TransferItem
 import com.tennanova.files.TransferState
 import com.tennanova.net.ConnectionTransport
+import com.tennanova.mirror.MirrorPhase
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -92,6 +93,8 @@ internal fun DashboardScreen(
     onSetSmsEnabled: (Boolean) -> Unit,
     onSetCallsEnabled: (Boolean) -> Unit,
     onGrantCallControl: () -> Unit,
+    onStartMirror: () -> Unit,
+    onStopMirror: () -> Unit,
     onCancelTransfer: (String) -> Unit = {},
     onClearTransfers: () -> Unit = {}
 ) {
@@ -153,6 +156,13 @@ internal fun DashboardScreen(
                                 onAction = onOpenAccessibility
                             )
                         }
+                    }
+                }
+
+                if (state.peerSupportsMirror || state.mirror.isActive) {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        SectionTitle("Screen mirroring")
+                        MirrorCard(state, onStartMirror, onStopMirror)
                     }
                 }
 
@@ -228,6 +238,68 @@ internal fun DashboardScreen(
         onDismiss = { showUnpair = false },
         onConfirm = { showUnpair = false; onUnpair() }
     )
+}
+
+@Composable
+private fun MirrorCard(
+    state: MainUiState,
+    onStart: () -> Unit,
+    onStop: () -> Unit
+) {
+    val active = state.mirror.isActive
+    val awaitingApproval = state.mirror.phase == MirrorPhase.APPROVAL_REQUIRED
+    val local = state.transport == ConnectionTransport.LAN ||
+        state.transport == ConnectionTransport.USB
+    val status = when (state.mirror.phase) {
+        MirrorPhase.APPROVAL_REQUIRED -> "Waiting for approval"
+        MirrorPhase.STARTING -> "Starting"
+        MirrorPhase.STREAMING -> "Mirroring"
+        MirrorPhase.STOPPING -> "Stopping"
+        MirrorPhase.ERROR -> "Needs attention"
+        else -> if (local) "Ready" else "Local connection required"
+    }
+    val detail = when (state.mirror.phase) {
+        MirrorPhase.APPROVAL_REQUIRED ->
+            "Approve Android's screen-sharing prompt to continue."
+        MirrorPhase.STARTING -> "Preparing a private video connection to your Mac."
+        MirrorPhase.STREAMING -> if (state.mirror.controlAvailable)
+            "Your Mac can view and control this screen. Locking the phone stops sharing."
+        else "Your Mac can view this screen. Enable Accessibility for touch controls."
+        MirrorPhase.ERROR -> when (state.mirror.reason) {
+            "not_local" -> "Mirroring works over local Wi-Fi or USB, not the internet relay."
+            "permission_denied" -> "Screen-sharing approval was not granted."
+            else -> "The mirror session could not be started. Try again."
+        }
+        else -> if (local)
+            "Share this display with your Mac at up to 30 frames per second."
+        else "Connect on the same Wi-Fi or by USB before starting."
+    }
+    GlassSurface(
+        modifier = Modifier.fillMaxWidth(),
+        tone = GlassTone.Flat,
+        shape = MaterialTheme.shapes.medium,
+        cornerRadius = 16.dp
+    ) {
+        ListItem(
+            headlineContent = { Text("Phone screen on your Mac", fontWeight = FontWeight.Medium) },
+            overlineContent = { Text(status) },
+            supportingContent = { Text(detail) },
+            leadingContent = { Icon(Icons.Outlined.Devices, contentDescription = null) },
+            trailingContent = {
+                Button(
+                    onClick = if (active && !awaitingApproval) onStop else onStart,
+                    enabled = active || (state.peerSupportsMirror && local)
+                ) {
+                    Text(when {
+                        awaitingApproval -> "Approve"
+                        active -> "Stop"
+                        else -> "Start"
+                    })
+                }
+            },
+            colors = ListItemDefaults.colors(containerColor = Color.Transparent)
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)

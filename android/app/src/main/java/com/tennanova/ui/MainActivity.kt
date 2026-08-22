@@ -19,6 +19,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.content.ContextCompat
+import androidx.activity.result.ActivityResult
+import com.tennanova.mirror.MirrorProjectionService
+import com.tennanova.mirror.MirrorSessionCoordinator
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions
 import com.google.mlkit.vision.codescanner.GmsBarcodeScanning
@@ -41,6 +44,29 @@ internal fun requiredOnboardingStep(
 class MainActivity : ComponentActivity() {
     private val viewModel by viewModels<MainViewModel>()
     private var onboardingStep: OnboardingStep? = null
+    private var pendingMirrorRequestId: String? = null
+
+    private val mirrorPermission = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result: ActivityResult ->
+        val requestId = pendingMirrorRequestId ?: return@registerForActivityResult
+        pendingMirrorRequestId = null
+        val data = result.data
+        if (result.resultCode != RESULT_OK || data == null) {
+            MirrorSessionCoordinator.permissionDenied(requestId)
+            return@registerForActivityResult
+        }
+        val sessionId = MirrorSessionCoordinator.approved(requestId) ?: return@registerForActivityResult
+        ContextCompat.startForegroundService(
+            this,
+            Intent(this, MirrorProjectionService::class.java)
+                .setAction(MirrorProjectionService.ACTION_START)
+                .putExtra(MirrorProjectionService.EXTRA_REQUEST_ID, requestId)
+                .putExtra(MirrorProjectionService.EXTRA_SESSION_ID, sessionId)
+                .putExtra(MirrorProjectionService.EXTRA_RESULT_CODE, result.resultCode)
+                .putExtra(MirrorProjectionService.EXTRA_RESULT_DATA, data)
+        )
+    }
 
     /**
      * A share is consumed once, not once per Activity instance. `onCreate` runs again on every
@@ -160,6 +186,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        RuntimeStatusStore.initialize(this)
+        pendingMirrorRequestId = savedInstanceState?.getString(KEY_PENDING_MIRROR_REQUEST)
         onboardingStep = savedInstanceState?.getString(KEY_ONBOARDING_STEP)
             ?.let { runCatching { OnboardingStep.valueOf(it) }.getOrNull() }
         shareConsumed = savedInstanceState?.getBoolean(KEY_SHARE_CONSUMED) == true
@@ -195,6 +223,10 @@ class MainActivity : ComponentActivity() {
                     onSetSmsEnabled = ::setSmsEnabled,
                     onSetCallsEnabled = ::setCallsEnabled,
                     onGrantCallControl = ::requestCallControl,
+                    onStartMirror = ::startMirror,
+                    onStopMirror = {
+                        MirrorSessionCoordinator.cancel(this, "user")
+                    },
                     onCancelTransfer = RuntimeStatusStore::cancelTransfer,
                     onClearTransfers = RuntimeStatusStore::clearFinishedTransfers,
                 )
@@ -214,6 +246,7 @@ class MainActivity : ComponentActivity() {
                 }
             }
         }
+        consumeMirrorRequest(intent)
     }
 
     override fun onResume() {
@@ -236,11 +269,13 @@ class MainActivity : ComponentActivity() {
         shareConsumed = false
         consumePairingExtra(intent)
         consumeSharedContent(intent)
+        consumeMirrorRequest(intent)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
         onboardingStep?.let { outState.putString(KEY_ONBOARDING_STEP, it.name) }
         outState.putBoolean(KEY_SHARE_CONSUMED, shareConsumed)
+        pendingMirrorRequestId?.let { outState.putString(KEY_PENDING_MIRROR_REQUEST, it) }
         super.onSaveInstanceState(outState)
     }
 
@@ -248,6 +283,34 @@ class MainActivity : ComponentActivity() {
         intent?.getStringExtra("pair")?.let {
             if (viewModel.pair(it)) beginOnboarding()
         }
+    }
+
+    private fun consumeMirrorRequest(intent: Intent?) {
+        val requestId = intent?.getStringExtra(EXTRA_MIRROR_REQUEST_ID) ?: return
+        intent.removeExtra(EXTRA_MIRROR_REQUEST_ID)
+        launchMirrorPermission(requestId)
+    }
+
+    private fun startMirror() {
+        val current = MirrorSessionCoordinator.current()
+        if (current.phase == com.tennanova.mirror.MirrorPhase.APPROVAL_REQUIRED) {
+            current.requestId?.let(::launchMirrorPermission)
+            return
+        }
+        val requestId = MirrorSessionCoordinator.beginFromPhone()
+        if (requestId == null) {
+            viewModel.setMessage("Connect directly to an updated Mac before mirroring.")
+            return
+        }
+        launchMirrorPermission(requestId)
+    }
+
+    private fun launchMirrorPermission(requestId: String) {
+        if (pendingMirrorRequestId != null) return
+        if (MirrorSessionCoordinator.current().requestId != requestId) return
+        pendingMirrorRequestId = requestId
+        val manager = getSystemService(android.media.projection.MediaProjectionManager::class.java)
+        mirrorPermission.launch(manager.createScreenCaptureIntent())
     }
 
     /**
@@ -407,8 +470,10 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    private companion object {
+    companion object {
         const val KEY_ONBOARDING_STEP = "onboardingStep"
         const val KEY_SHARE_CONSUMED = "shareConsumed"
+        const val KEY_PENDING_MIRROR_REQUEST = "pendingMirrorRequest"
+        const val EXTRA_MIRROR_REQUEST_ID = "mirrorRequestId"
     }
 }

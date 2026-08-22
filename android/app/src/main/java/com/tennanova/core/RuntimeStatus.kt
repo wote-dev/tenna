@@ -5,6 +5,7 @@ import com.tennanova.clipboard.ClipboardPayload
 import com.tennanova.files.TransferItem
 import com.tennanova.net.ConnectionTransport
 import com.tennanova.notifications.TennaNotificationListener
+import com.tennanova.mirror.MirrorSnapshot
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -73,6 +74,8 @@ data class RuntimeSnapshot(
     val calls: CallAccessStatus = CallAccessStatus.OFF,
     val peerSupportsImages: Boolean = false,
     val peerSupportsFiles: Boolean = false,
+    val peerSupportsMirror: Boolean = false,
+    val mirror: MirrorSnapshot = MirrorSnapshot(),
     /**
      * Files going each way. Carried inside the snapshot rather than as a flow of its own:
      * `MainViewModel.combine` is already at its five-argument overload, and a sixth forces
@@ -87,6 +90,12 @@ data class RuntimeSnapshot(
 
 /** Process-wide, observable status only. The service reference is weak and cleared on destroy. */
 object RuntimeStatusStore {
+    lateinit var context: android.content.Context
+        private set
+
+    fun initialize(context: android.content.Context) {
+        this.context = context.applicationContext
+    }
     private val mutable = MutableStateFlow(RuntimeSnapshot())
     val state: StateFlow<RuntimeSnapshot> = mutable.asStateFlow()
 
@@ -94,6 +103,7 @@ object RuntimeStatusStore {
     private var serviceRef = WeakReference<TennaNotificationListener>(null)
 
     fun attach(service: TennaNotificationListener) {
+        initialize(service)
         serviceRef = WeakReference(service)
     }
 
@@ -134,10 +144,22 @@ object RuntimeStatusStore {
         mutable.update { it.copy(clipboard = status, clipboardError = error) }
     }
 
-    fun updatePeerCapabilities(supportsImages: Boolean, supportsFiles: Boolean = false) {
+    fun updatePeerCapabilities(
+        supportsImages: Boolean,
+        supportsFiles: Boolean = false,
+        supportsMirror: Boolean = false
+    ) {
         mutable.update {
-            it.copy(peerSupportsImages = supportsImages, peerSupportsFiles = supportsFiles)
+            it.copy(
+                peerSupportsImages = supportsImages,
+                peerSupportsFiles = supportsFiles,
+                peerSupportsMirror = supportsMirror
+            )
         }
+    }
+
+    fun updateMirror(mirror: MirrorSnapshot) {
+        mutable.update { it.copy(mirror = mirror) }
     }
 
     fun updateTransfers(transfers: List<TransferItem>) {
